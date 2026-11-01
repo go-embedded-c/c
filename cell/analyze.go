@@ -83,7 +83,9 @@ type Analysis struct {
 	Diagnostics []Diagnostic
 	Decls       []Chunk // external declarations and directives, in order
 	Stmts       []Chunk // statements, run in order by the cell's function
+	Hoisted     []Chunk // declarations (also in Decls) whose initialisers run in order with Stmts
 	prelude     string  // what the cell adds to Context.Prelude
+	hoists      map[int]hoisted
 }
 
 // Names of the synthesized sources, as they appear in cc/v4 positions.
@@ -144,7 +146,7 @@ func Analyze(src []byte, ctx Context, lim Limits) *Analysis {
 	// chunk, so there are at most len(chunks)+1 rounds.
 	for range len(chunks) + 1 {
 		var perr error
-		ast, perr = parse(cfg, assemble(src, ctx, chunks, stmt), false)
+		ast, perr = parse(cfg, assemble(src, ctx, chunks, stmt, nil), false)
 		if perr == nil {
 			moved := false
 			for l := ast.TranslationUnit; l != nil; l = l.TranslationUnit {
@@ -178,21 +180,40 @@ func Analyze(src []byte, ctx Context, lim Limits) *Analysis {
 		}
 		stmt[i], asDecl[i] = true, d
 	}
+	hoists := map[int]hoisted{}
+	for l := ast.TranslationUnit; l != nil; l = l.TranslationUnit {
+		ed := l.ExternalDeclaration
+		if ed.Case != cc.ExternalDeclarationDecl {
+			continue
+		}
+		if p, ok := cellPosition(ed); ok {
+			if i := chunkAt(chunks, lines, p); i >= 0 && !stmt[i] {
+				if h, ok := hoistable(src, lines, chunks[i], ed.Declaration); ok {
+					hoists[i] = h
+				}
+			}
+		}
+	}
+	a.hoists = hoists
 	for i, c := range chunks {
-		if stmt[i] {
+		switch _, h := hoists[i]; {
+		case stmt[i]:
 			a.Stmts = append(a.Stmts, c)
-		} else {
+		case h:
+			a.Hoisted = append(a.Hoisted, c)
+			a.Decls = append(a.Decls, c)
+		default:
 			a.Decls = append(a.Decls, c)
 		}
 	}
-	ast, err = parse(cfg, assemble(src, ctx, chunks, stmt), true)
+	ast, err = parse(cfg, assemble(src, ctx, chunks, stmt, hoists), true)
 	if err != nil {
 		a.Diagnostics = cellDiagnostics(diagnostics(err))
 		return a
 	}
 	a.Defines = defines(src, ast, chunks)
 	a.Uses = uses(src, chunks, ctx, a.Defines)
-	a.prelude = preludeOf(src, lines, ast, chunks, stmt)
+	a.prelude = preludeOf(src, lines, ast, chunks, stmt, hoists)
 	return a
 }
 
@@ -216,23 +237,27 @@ func parse(cfg *cc.Config, tu string, check bool) (ast *cc.AST, err error) {
 }
 
 // assemble builds the translation unit: the prelude, the directives and
-// declarations at their cell positions, then the statements wrapped in a
-// function.
-func assemble(src []byte, ctx Context, chunks []Chunk, stmt []bool) string {
+// declarations at their cell positions, then the statements (hoisted
+// initialisations included, in source order) wrapped in a function.
+func assemble(src []byte, ctx Context, chunks []Chunk, stmt []bool, hoists map[int]hoisted) string {
 	var b strings.Builder
 	b.WriteString(ctx.Prelude)
-	emit := func(c Chunk) {
-		fmt.Fprintf(&b, "\n#line %d \"%s\"\n%s%s\n", c.Line, cellName, strings.Repeat(" ", c.Col-1), src[c.Start:c.End])
+	emit := func(c Chunk, text string) {
+		fmt.Fprintf(&b, "\n#line %d \"%s\"\n%s%s\n", c.Line, cellName, strings.Repeat(" ", c.Col-1), text)
 	}
 	for i, c := range chunks {
-		if !stmt[i] {
-			emit(c)
+		if h, ok := hoists[i]; ok {
+			emit(c, h.decl)
+		} else if !stmt[i] {
+			emit(c, string(src[c.Start:c.End]))
 		}
 	}
 	fmt.Fprintf(&b, "\n#line 1 \"%s\"\nvoid __cell(void) {\n", wrapperName)
 	for i, c := range chunks {
-		if stmt[i] {
-			emit(c)
+		if h, ok := hoists[i]; ok {
+			emit(c, h.stmt)
+		} else if stmt[i] {
+			emit(c, string(src[c.Start:c.End]))
 		}
 	}
 	fmt.Fprintf(&b, "\n#line 2 \"%s\"\n}\n", wrapperName)

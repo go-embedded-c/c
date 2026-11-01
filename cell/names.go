@@ -179,7 +179,7 @@ func (s *scanner) atLineStart() bool {
 // definition becomes its prototype; an initialised object loses its
 // initialiser (and becomes extern when it has no storage class), keeping an
 // array's length.
-func preludeOf(src []byte, lines []int, ast *cc.AST, chunks []Chunk, stmt []bool) string {
+func preludeOf(src []byte, lines []int, ast *cc.AST, chunks []Chunk, stmt []bool, hoists map[int]hoisted) string {
 	byChunk := map[int]*cc.ExternalDeclaration{}
 	for l := ast.TranslationUnit; l != nil; l = l.TranslationUnit {
 		if p, ok := cellPosition(l.ExternalDeclaration); ok {
@@ -189,23 +189,37 @@ func preludeOf(src []byte, lines []int, ast *cc.AST, chunks []Chunk, stmt []bool
 		}
 	}
 	var b strings.Builder
-	at := func(n cc.Node) int {
-		p, _ := cellPosition(n)
-		return offset(lines, p.Line, p.Column)
-	}
 	for i, c := range chunks {
 		if stmt[i] {
 			continue
 		}
+		// at returns a node's offset inside this chunk, or -1 (see hoistable).
+		at := func(n cc.Node) int {
+			if p, ok := cellPosition(n); ok {
+				if o := offset(lines, p.Line, p.Column); o >= c.Start && o <= c.End {
+					return o
+				}
+			}
+			return -1
+		}
 		text := string(src[c.Start:c.End])
-		if ed := byChunk[i]; ed != nil {
+		if h, ok := hoists[i]; ok {
+			// The blanked initialisers leave runs of spaces; squeeze them.
+			text = strings.Join(strings.Fields(h.decl), " ")
+			text = strings.NewReplacer(" ,", ",", " ;", ";").Replace(text)
+			if ed := byChunk[i]; ed != nil && !hasStorageClass(ed.Declaration) {
+				text = "extern " + text
+			}
+		} else if ed := byChunk[i]; ed != nil {
 			switch ed.Case {
 			case cc.ExternalDeclarationFuncDef:
 				fd := ed.FunctionDefinition
 				if fd.DeclarationList != nil {
 					continue // K&R definition: no prototype to write
 				}
-				text = strings.TrimSpace(string(src[c.Start:at(fd.CompoundStatement)])) + ";"
+				if o := at(fd.CompoundStatement); o >= 0 {
+					text = strings.TrimSpace(string(src[c.Start:o])) + ";"
+				}
 			case cc.ExternalDeclarationDecl:
 				text = declarationOnly(src, c, ed.Declaration, at)
 			}
@@ -213,6 +227,18 @@ func preludeOf(src []byte, lines []int, ast *cc.AST, chunks []Chunk, stmt []bool
 		fmt.Fprintf(&b, "%s\n", text)
 	}
 	return b.String()
+}
+
+func hasStorageClass(d *cc.Declaration) bool {
+	if d == nil {
+		return false
+	}
+	for ds := d.DeclarationSpecifiers; ds != nil; ds = ds.DeclarationSpecifiers {
+		if ds.StorageClassSpecifier != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func declarationOnly(src []byte, c Chunk, d *cc.Declaration, at func(cc.Node) int) string {
@@ -229,24 +255,29 @@ func declarationOnly(src []byte, c Chunk, d *cc.Declaration, at func(cc.Node) in
 	if !initialised {
 		return text
 	}
-	var b strings.Builder
-	storage := false
-	for ds := d.DeclarationSpecifiers; ds != nil; ds = ds.DeclarationSpecifiers {
-		storage = storage || ds.StorageClassSpecifier != nil
-	}
-	if !storage {
-		b.WriteString("extern ")
-	}
-	b.WriteString(strings.TrimSpace(string(src[c.Start:at(ids[0])])))
+	// Every cut must lie in the chunk, in order; otherwise keep the text.
+	starts, ends := make([]int, len(ids)), make([]int, len(ids))
+	prev := c.Start
 	for k, id := range ids {
-		end := c.End
+		starts[k], ends[k] = at(id), c.End
 		switch {
 		case id.Case == cc.InitDeclaratorInit:
-			end = at(id.Token) // '='
+			ends[k] = at(id.Token) // '='
 		case k+1 < len(ids):
-			end = at(ids[k+1])
+			ends[k] = at(ids[k+1])
 		}
-		dt := strings.TrimRight(strings.TrimSpace(string(src[at(id):end])), ",;")
+		if starts[k] < prev || ends[k] < starts[k] {
+			return text
+		}
+		prev = ends[k]
+	}
+	var b strings.Builder
+	if !hasStorageClass(d) {
+		b.WriteString("extern ")
+	}
+	b.WriteString(strings.TrimSpace(string(src[c.Start:starts[0]])))
+	for k, id := range ids {
+		dt := strings.TrimRight(strings.TrimSpace(string(src[starts[k]:ends[k]])), ",;")
 		if at, ok := id.Declarator.Type().(*cc.ArrayType); ok && at.Len() >= 0 {
 			dt = strings.Replace(dt, "[]", fmt.Sprintf("[%d]", at.Len()), 1)
 		}
