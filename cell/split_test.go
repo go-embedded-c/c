@@ -99,6 +99,21 @@ func TestSplitPositions(t *testing.T) {
 	}
 }
 
+func TestSplitInnerDirective(t *testing.T) {
+	src := "int f(void) {\n#define OPEN {\n  return 1;\n}\nx;"
+	chunks, err := Split([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 2 || src[chunks[0].Start:chunks[0].End] != "int f(void) {\n#define OPEN {\n  return 1;\n}" {
+		t.Fatalf("chunks %+v", chunks)
+	}
+	d := chunks[0].Directives
+	if len(d) != 1 || src[d[0].Start:d[0].End] != "#define OPEN {" || d[0].Line != 2 || d[0].Col != 1 {
+		t.Errorf("inner directives %+v", d)
+	}
+}
+
 func TestSplitErrors(t *testing.T) {
 	for _, tc := range []struct{ src, want string }{
 		{"/* open", "1:1: unterminated comment"},

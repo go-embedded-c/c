@@ -26,6 +26,9 @@ type Chunk struct {
 	Kind       ChunkKind
 	Start, End int
 	Line, Col  int
+	// Directives are the preprocessor lines inside a Code chunk (in a
+	// function body, say); the splitter skips them like comments.
+	Directives []Chunk
 }
 
 // SyntaxError is a cell the splitter cannot cut: an unterminated comment,
@@ -308,8 +311,17 @@ func (s *scanner) code() (Chunk, error) {
 	assigned := false  // an assignment outside brackets: braces after it are initializers or compound literals
 	pendingDo := 0     // `do` statements still waiting for their `while`
 	for {
-		if _, err := s.skipSpace(); err != nil {
+		nl, err := s.skipSpace()
+		if err != nil {
 			return c, err
+		}
+		if nl && s.off < len(s.src) && s.src[s.off] == '#' {
+			d, err := s.directive()
+			if err != nil {
+				return c, err
+			}
+			c.Directives = append(c.Directives, d)
+			continue
 		}
 		if s.off >= len(s.src) {
 			if len(stack) != 0 {
