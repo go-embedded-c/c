@@ -52,7 +52,7 @@ jobs:
       - run: "$(go env GOPATH)/bin/govulncheck ./..."
 
   # A short run of every fuzz target: the golden decoder reads files from a
-  # working tree, and cc/v4 is fed untrusted C.
+  # working tree, and cc/v4 and the cell splitter are fed untrusted C.
   fuzz:
     name: fuzz (${{ matrix.target }})
     runs-on: ubuntu-latest
@@ -62,6 +62,8 @@ jobs:
         include:
           - { pkg: ./internal/golden, target: FuzzDecode }
           - { pkg: ./internal/cparse, target: FuzzSource }
+          - { pkg: ./cell, target: FuzzSplit }
+          - { pkg: ./cell, target: FuzzAnalyze }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7

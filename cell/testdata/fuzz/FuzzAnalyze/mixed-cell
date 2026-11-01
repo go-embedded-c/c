@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("typedef struct { int a; } T; T t = {1}; t.a++; do t.a--; while (t.a); if (t.a) {} else t.a = (T){2}.a;")

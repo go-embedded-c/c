@@ -12,7 +12,9 @@ import (
 // into headers.ClangDir: the C library headers clang provides itself, and the
 // wasm SIMD intrinsics. Every other file of the resource directory is an
 // intrinsic header of another target, a GPU or offload wrapper, or a module
-// map.
+// map. tgmath.h is left out on purpose: clang's is built on
+// __attribute__((overloadable)), which cc/v4 does not parse; libc's (musl's,
+// on __typeof__ and _Generic-free conditionals) is found instead.
 var clangResourceHeaders = []string{
 	"__float_float.h", "__float_header_macro.h", "__float_infinity_nan.h",
 	"__stdarg___gnuc_va_list.h", "__stdarg___va_copy.h", "__stdarg_header_macro.h",
@@ -23,7 +25,7 @@ var clangResourceHeaders = []string{
 	"__stddef_wchar_t.h", "__stddef_wint_t.h",
 	"float.h", "inttypes.h", "iso646.h", "limits.h", "stdalign.h", "stdarg.h",
 	"stdatomic.h", "stdbool.h", "stdckdint.h", "stdcountof.h", "stddef.h",
-	"stdint.h", "stdnoreturn.h", "tgmath.h", "varargs.h", "wasm_simd128.h",
+	"stdint.h", "stdnoreturn.h", "varargs.h", "wasm_simd128.h",
 }
 
 // Sources locates what Generate copies.

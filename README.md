@@ -20,7 +20,7 @@ is checked against a reference, never against expectations written by hand.
 | milestone | contents | state |
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
-| M1 front end | wasm32 `ABI` for cc/v4, embedded wasi-libc headers, cell splitter and prelude | planned |
+| M1 front end | package `cell`: splitter, declaration/statement classification, embedded headers, defines/uses, prelude; still to come: hoisting, wasm32 `ABI` upstream | **in progress** |
 | M2 code generator | cc/v4 AST → wasm32 | planned |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
@@ -94,6 +94,38 @@ sysroot, no host compiler (`NewConfig` is not used). Files taken:
 Tests hold these as floors. cc/v4 panics on some malformed input (three
 reproducers are kept in `knownPanics` and the fuzz corpus); `cparse` recovers
 every panic into a `*PanicError`.
+
+## Cells (M1, in progress)
+
+Package `cell` analyses a notebook C cell without a host compiler or a file
+system, so it runs unchanged in the wasm playground:
+
+```go
+a := cell.Analyze(src, ctx, cell.Limits{})
+// a.Diagnostics: line:col in the cell
+// a.Defines:     file-scope names, with their kind (function, variable, typedef, tag, enumerator, macro)
+// a.Uses:        names defined by earlier cells that this cell reads
+// a.Decls, a.Stmts: the cell's chunks, classified
+ctx = ctx.Extend(a)    // what later cells see
+```
+
+A cell may mix declarations and statements: `int x = 2; printf("%d\n", x * x);`
+is a cell. Each top-level chunk that cc/v4 parses as a declaration with a type
+is one; the others (including `x = 3;`, which C89 would read as an implicit
+`int` declaration) are statements, run in order by the cell's function. Later
+cells see earlier declarations: functions as prototypes, objects without their
+initialiser (bib/c-cpp.md §2.5).
+
+The headers a cell can `#include` are embedded (`headers`): wasi-libc's for
+wasm32-wasip1 and clang's own C headers, at the oracle's pinned revisions.
+`setjmp.h` and `signal.h` stop with wasi-libc's `#error`, as under clang.
+
+**Security.** cc/v4 falls back to the host file system for a file it does not
+find in its `fs.FS`, so on the desktop a cell could `#include` a host file.
+`cell` refuses that before cc/v4 runs: only literal includes of embedded
+headers, no `#line`, `#include_next` or `__has_include`, and no `#define` of a
+word that occurs in an include path. `TestGuardIsNotVacuous` shows cc/v4
+reading a host file when the guard is bypassed.
 
 ## Not yet
 
