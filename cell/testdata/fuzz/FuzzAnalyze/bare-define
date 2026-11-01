@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("#define\nint f(void) {\n#define OPEN {\nreturn 1; }")
