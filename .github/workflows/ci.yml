@@ -94,7 +94,7 @@ jobs:
       - name: gcc 15.2.0 gcc.c-torture/execute (sparse, by commit)
         run: |
           git init -q "$RUNNER_TEMP/gcc"
-          git -C "$RUNNER_TEMP/gcc" sparse-checkout set --no-cone /gcc/testsuite/gcc.c-torture/execute
+          git -C "$RUNNER_TEMP/gcc" sparse-checkout set --no-cone /gcc/testsuite/gcc.c-torture/execute /gcc/testsuite/gcc.dg/pr98304-1.c
           git -C "$RUNNER_TEMP/gcc" fetch -q --depth 1 --filter=blob:none https://github.com/gcc-mirror/gcc "$GCC_COMMIT"
           git -C "$RUNNER_TEMP/gcc" checkout -q FETCH_HEAD
       - name: c-testsuite (by commit)
