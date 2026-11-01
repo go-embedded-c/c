@@ -79,6 +79,67 @@ func TestDefinesAndUses(t *testing.T) {
 	}
 }
 
+func TestHoist(t *testing.T) {
+	for _, tc := range []struct {
+		src, decl, stmt string // decl/stmt: the hoisted chunk's two texts; "" = not hoisted
+	}{
+		{"i++; int j = i;", "int j    ;", "    j = i;"},
+		{"int a = 1, b, c = a;", "int a    , b, c    ;", "    a = 1,    c = a;"},
+		{"int a = 1, b;", "int a    , b;", "    a = 1   ;"},
+		{"int a, b = 2;", "int a, b    ;", "       b = 2;"},
+		{"char *s = \"x\";", "char *s      ;", "      s = \"x\";"},
+		{"static long n = 3;", "static long n    ;", "            n = 3;"},
+		{"const char *p = \"x\";", "const char *p      ;", "            p = \"x\";"},
+		{"int a[] = {1, 2};", "", ""},
+		{"struct { int x; } s = {1};", "", ""},
+		{"const int k = 3;", "", ""},
+		{"typedef int T;", "", ""},
+		{"extern int e;", "", ""},
+		{"int noinit;", "", ""},
+	} {
+		chunks, err := Split([]byte(tc.src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := Context{}
+		if strings.HasPrefix(tc.src, "i++") {
+			ctx = Context{}.Extend(mustAnalyze(t, "int i;", Context{}))
+		}
+		a := mustAnalyze(t, tc.src, ctx)
+		var got []string
+		for _, h := range a.Hoisted {
+			got = append(got, tc.src[h.Start:h.End])
+		}
+		last := chunks[len(chunks)-1]
+		want := []string{tc.src[last.Start:last.End]}
+		if tc.decl == "" {
+			want = nil
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%q: hoisted %q, want %q", tc.src, got, want)
+			continue
+		}
+		if tc.decl == "" {
+			continue
+		}
+		h := a.hoists[len(chunks)-1]
+		if h.decl != tc.decl || h.stmt != tc.stmt {
+			t.Errorf("%q:\n decl %q want %q\n stmt %q want %q", tc.src, h.decl, tc.decl, h.stmt, tc.stmt)
+		}
+	}
+}
+
+func TestHoistOrderAndDiagnostics(t *testing.T) {
+	// The cling case type-checks once hoisted: j's initialiser is not a
+	// constant expression, so it could not stay at file scope.
+	mustAnalyze(t, "int i = 1; i++; int j = i;", Context{})
+	// An error in a hoisted initialiser is reported at its cell column.
+	a := Analyze([]byte("int i;\nint j = nosuch + 1;"), Context{}, Limits{})
+	if len(a.Diagnostics) == 0 || a.Diagnostics[0].Line != 2 || a.Diagnostics[0].Col != 9 {
+		t.Errorf("diagnostics %v, want 2:9", a.Diagnostics)
+	}
+}
+
 func TestUsesSkipsMembers(t *testing.T) {
 	a1 := mustAnalyze(t, "int x; struct s { int x; } v;", Context{})
 	a2 := mustAnalyze(t, "v.x = 1;", Context{}.Extend(a1))

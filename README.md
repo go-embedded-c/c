@@ -20,7 +20,7 @@ is checked against a reference, never against expectations written by hand.
 | milestone | contents | state |
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
-| M1 front end | package `cell`: splitter, declaration/statement classification, embedded headers, defines/uses, prelude; still to come: hoisting, wasm32 `ABI` upstream | **in progress** |
+| M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses, prelude; still to come: wasm32 `ABI` upstream, go-notebook adapter | **in progress** |
 | M2 code generator | cc/v4 AST → wasm32 | planned |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
@@ -115,6 +115,12 @@ is one; the others (including `x = 3;`, which C89 would read as an implicit
 `int` declaration) are statements, run in order by the cell's function. Later
 cells see earlier declarations: functions as prototypes, objects without their
 initialiser (bib/c-cpp.md §2.5).
+
+Initialised objects are hoisted, as cling does: the declaration stays at file
+scope and the initialisation runs as an assignment in source order, so
+`int i = 1; i++; int j = i;` leaves `j == 2`. Aggregates (`= {…}`), arrays and
+`const` objects keep their static initialiser, which C then requires to be
+constant.
 
 The headers a cell can `#include` are embedded (`headers`): wasi-libc's for
 wasm32-wasip1 and clang's own C headers, at the oracle's pinned revisions.
