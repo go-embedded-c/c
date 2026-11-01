@@ -86,6 +86,7 @@ type Analysis struct {
 	Hoisted     []Chunk // declarations (also in Decls) whose initialisers run in order with Stmts
 	prelude     string  // what the cell adds to Context.Prelude
 	hoists      map[int]hoisted
+	passes      int // cc/v4 runs, for the tests
 }
 
 // Names of the synthesized sources, as they appear in cc/v4 positions.
@@ -137,15 +138,30 @@ func Analyze(src []byte, ctx Context, lim Limits) *Analysis {
 		return a
 	}
 	lines := lineStarts(src)
+	macros := map[string]bool{}
+	for name, k := range ctx.Defined {
+		if k == Macro {
+			macros[name] = true
+		}
+	}
+	for _, n := range macroNames(src, chunks) {
+		macros[n.Name] = true
+	}
 	stmt := make([]bool, len(chunks))
+	for i, c := range chunks {
+		stmt[i] = c.Kind == Code && certainStatement(src, c, macros)
+	}
 	asDecl := make([][]rawDiagnostic, len(chunks)) // why a chunk failed as a declaration
 	var ast *cc.AST
-	// Classify: every Code chunk starts as a declaration; one cc/v4 cannot
-	// parse as one, or that parses only as an implicit-int declaration
+	// Classify: every other Code chunk starts as a declaration; one cc/v4
+	// cannot parse as one, or that parses only as an implicit-int declaration
 	// (`x = 3;`, `f(x);`), becomes a statement. Each round moves at least one
-	// chunk, so there are at most len(chunks)+1 rounds.
+	// chunk, so there are at most len(chunks)+1 rounds. The rounds only parse:
+	// a type error must not move a chunk, or `int j = i;` would become a local
+	// variable instead of a hoisted global.
 	for range len(chunks) + 1 {
 		var perr error
+		a.passes++
 		ast, perr = parse(cfg, assemble(src, ctx, chunks, stmt, nil), false)
 		if perr == nil {
 			moved := false
@@ -206,6 +222,7 @@ func Analyze(src []byte, ctx Context, lim Limits) *Analysis {
 			a.Decls = append(a.Decls, c)
 		}
 	}
+	a.passes++
 	ast, err = parse(cfg, assemble(src, ctx, chunks, stmt, hoists), true)
 	if err != nil {
 		a.Diagnostics = cellDiagnostics(diagnostics(err))
@@ -350,6 +367,66 @@ func chunkAt(chunks []Chunk, lines []int, p position) int {
 func cellPosition(n cc.Node) (position, bool) {
 	p := n.Position()
 	return position{p.Line, p.Column}, p.Filename == cellName
+}
+
+// certainStatement reports whether a chunk can only be a statement, judged
+// from its first tokens, so that classification need not spend a cc/v4 round
+// on it. No declaration starts with a statement keyword or '{'; none has an
+// identifier followed by an assignment, '++', '--', '.', '->' or '['; and in
+// `id ( x`, a declarator cannot start with a literal or a unary operator.
+// Anything else is left to cc/v4, and so is a chunk starting with a macro the
+// cell or an earlier one defines (`ALIGNED(16) int x;` may expand to a
+// declaration).
+func certainStatement(src []byte, c Chunk, macros map[string]bool) bool {
+	if startsStatement(src, c) {
+		return true
+	}
+	s := &scanner{src: src[:c.End], off: c.Start, line: c.Line, col: c.Col}
+	var toks []token
+	for len(toks) < 3 {
+		if _, err := s.skipSpace(); err != nil || s.off >= c.End {
+			break
+		}
+		t, err := s.lex()
+		if err != nil {
+			break
+		}
+		toks = append(toks, t)
+	}
+	if len(toks) < 2 || toks[0].word == "" || isDeclKeyword(toks[0].word) || macros[toks[0].word] {
+		return false
+	}
+	switch p := toks[1].punct; {
+	case p == '=' || p == opAssign || p == '.' || p == '[':
+		return true
+	case (p == '+' || p == '-') && len(toks) > 2 && toks[2].punct == p && toks[2].start == toks[1].start+1:
+		return true // ++ or --
+	case p == '-' && len(toks) > 2 && toks[2].punct == '>' && toks[2].start == toks[1].start+1:
+		return true // ->
+	case p == '(' && len(toks) > 2:
+		t := toks[2]
+		if t.word == "" && t.punct == 0 {
+			return true // a string, character or number literal
+		}
+		switch t.punct {
+		case '&', '-', '+', '!', '~':
+			return true
+		}
+	}
+	return false
+}
+
+// isDeclKeyword reports whether a word can start a declaration.
+func isDeclKeyword(w string) bool {
+	switch w {
+	case "typedef", "extern", "static", "auto", "register", "_Thread_local", "__thread",
+		"void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "_Bool", "bool",
+		"_Complex", "struct", "union", "enum", "const", "volatile", "restrict", "_Atomic",
+		"inline", "_Noreturn", "_Alignas", "alignas", "_Static_assert", "static_assert", "typeof", "__typeof__",
+		"__attribute__", "__extension__", "__auto_type", "__int128":
+		return true
+	}
+	return false
 }
 
 // startsStatement reports whether a chunk begins with a statement keyword or
