@@ -19,7 +19,7 @@
  * so that it doesn't add duplicate declarations to all of its includers'
  * modules.
  */
-#if defined(__MVS__) && __has_include_next(<stdarg.h>)
+#if 0 /* defined(__MVS__) && __has_include_next(<stdarg.h>): z/OS only (genheaders) */
 #undef __need___va_list
 #undef __need_va_list
 #undef __need_va_arg

@@ -12,21 +12,41 @@ package headers
 import (
 	"embed"
 	"io/fs"
+	"strings"
 )
 
 //go:embed all:include
 var tree embed.FS
 
-// Search directories, in clang's order for wasm32-wasip1: the resource
-// headers first (their stdint.h and inttypes.h #include_next libc's), then
-// libc's.
+// The embedded directories, and AllDir, a virtual directory holding both,
+// clang's file first when the two have one of the same name.
 const (
 	ClangDir = "include/clang"
 	WasiDir  = "include/wasi"
+	AllDir   = "include/all"
 )
 
-// SysIncludePaths is the #include <…> search path inside FS.
-var SysIncludePaths = []string{ClangDir, WasiDir}
+// SysIncludePaths is the #include <…> search path inside FS: clang's order
+// for wasm32-wasip1 (resource headers, then libc's), with the two merged in
+// AllDir so that a libc header is found at the first try. WasiDir follows
+// for the #include_next of clang's stdint.h and inttypes.h.
+//
+// A miss matters beyond speed: cc/v4 v4.30.5 retries a file missing from its
+// fs.FS with os.Open, a host system call (66 % of the analysis time with
+// the two directories searched in turn).
+var SysIncludePaths = []string{AllDir, WasiDir}
 
-// FS returns the embedded tree.
-func FS() fs.FS { return tree }
+// FS returns the embedded tree, with AllDir.
+func FS() fs.FS { return overlay{} }
+
+type overlay struct{}
+
+func (overlay) Open(name string) (fs.File, error) {
+	if rest, ok := strings.CutPrefix(name, AllDir+"/"); ok {
+		if f, err := tree.Open(ClangDir + "/" + rest); err == nil {
+			return f, nil
+		}
+		return tree.Open(WasiDir + "/" + rest)
+	}
+	return tree.Open(name)
+}

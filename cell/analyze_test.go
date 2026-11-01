@@ -217,6 +217,40 @@ func TestStandardHeaders(t *testing.T) {
 	mustAnalyze(t, src+"int main(void) { printf(\"%zu\\n\", strlen(\"abc\")); return 0; }\n", Context{})
 }
 
+type countingFS struct {
+	fs.FS
+	misses *[]string
+}
+
+func (c countingFS) Open(name string) (fs.File, error) {
+	f, err := c.FS.Open(name)
+	if err != nil {
+		*c.misses = append(*c.misses, name)
+	}
+	return f, err
+}
+
+// TestNoHeaderMisses: every #include of the standard headers is found in the
+// embedded tree at the first try. A miss is a host system call (cc/v4 retries
+// it with os.Open), and once cost 66 % of the analysis time.
+func TestNoHeaderMisses(t *testing.T) {
+	var misses []string
+	saved := headerFS
+	headerFS = func() fs.FS { return countingFS{headers.FS(), &misses} }
+	defer func() { headerFS = saved }()
+	src := ""
+	for _, h := range []string{"assert", "ctype", "errno", "float", "inttypes", "limits", "locale", "math", "stdalign", "stdarg", "stdatomic", "stdbool", "stddef", "stdint", "stdio", "stdlib", "stdnoreturn", "string", "tgmath", "time", "uchar", "wchar", "wctype", "complex", "iso646", "fenv"} {
+		src += "#include <" + h + ".h>\n"
+	}
+	mustAnalyze(t, src+"int x;\n", Context{})
+	// The __has_include_next probes of clang's stddef.h, stdarg.h and
+	// stdatomic.h were misses too; genheaders replaces them by their constant
+	// answer (clangPatches).
+	if len(misses) != 0 {
+		t.Errorf("%d lookups missed the embedded tree (each one a host os.Open or os.Stat): %q", len(misses), misses)
+	}
+}
+
 func TestTgmath(t *testing.T) {
 	mustAnalyze(t, "#include <tgmath.h>\ndouble r; float f; r = sqrt(2.0); f = sqrt(2.0f);", Context{})
 }
