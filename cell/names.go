@@ -46,6 +46,20 @@ func defines(src []byte, ast *cc.AST, chunks []Chunk) []Name {
 			}
 		}
 	}
+	r = append(r, macroNames(src, chunks)...)
+	slices.SortStableFunc(r, func(a, b Name) int {
+		if a.Line != b.Line {
+			return a.Line - b.Line
+		}
+		return a.Col - b.Col
+	})
+	return r
+}
+
+// macroNames lists the macros the cell's #define lines introduce, top-level
+// and inside code chunks.
+func macroNames(src []byte, chunks []Chunk) []Name {
+	var r []Name
 	for _, c := range chunks {
 		ds := c.Directives
 		if c.Kind == Directive {
@@ -65,12 +79,6 @@ func defines(src []byte, ast *cc.AST, chunks []Chunk) []Name {
 			}
 		}
 	}
-	slices.SortStableFunc(r, func(a, b Name) int {
-		if a.Line != b.Line {
-			return a.Line - b.Line
-		}
-		return a.Col - b.Col
-	})
 	return r
 }
 

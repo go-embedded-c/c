@@ -241,6 +241,38 @@ const benchCell = "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\
 	"for (int i = 1; i < 3; i++) total += dist(ps[i-1], ps[i]);\n" +
 	"printf(\"%g\\n\", total);\n"
 
+func TestPasses(t *testing.T) {
+	// One parse to classify and find the hoists, one Translate: the
+	// statements of benchCell are all recognised without a failing round.
+	if a := mustAnalyze(t, benchCell, Context{}); a.passes != 2 {
+		t.Errorf("benchCell took %d cc/v4 passes, want 2", a.passes)
+	}
+}
+
+func TestCertainStatement(t *testing.T) {
+	macros := map[string]bool{"ALIGNED": true}
+	for _, tc := range []struct {
+		src  string
+		want bool
+	}{
+		{"if (x) y();", true}, {"{ x(); }", true}, {"return;", true},
+		{"x = 1;", true}, {"x += 1;", true}, {"x++;", true}, {"x--;", true},
+		{"p->a = 1;", true}, {"s.a = 1;", true}, {"a[0] = 1;", true},
+		{`printf("%d\n", 1);`, true}, {"f(1);", true}, {"f(&x);", true}, {"f(-1);", true},
+		{"f(x);", false}, {"f();", false}, {"T x;", false}, {"T *p;", false}, {"T (x);", false},
+		{"int x = 1;", false}, {"struct s v;", false}, {"x == 1;", false},
+		{"ALIGNED(16) int x;", false}, {"static_assert(1, \"\");", false},
+	} {
+		chunks, err := Split([]byte(tc.src))
+		if err != nil || len(chunks) != 1 {
+			t.Fatalf("Split(%q): %v %v", tc.src, chunks, err)
+		}
+		if got := certainStatement([]byte(tc.src), chunks[0], macros); got != tc.want {
+			t.Errorf("certainStatement(%q) = %v, want %v", tc.src, got, tc.want)
+		}
+	}
+}
+
 func BenchmarkAnalyze(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
