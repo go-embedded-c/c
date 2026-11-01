@@ -3,6 +3,7 @@ package oracle_test
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -38,7 +39,7 @@ func TestLocate(t *testing.T) {
 	}
 	t.Setenv(oracle.EnvHome, "/h")
 	tc, err := oracle.Locate()
-	if err != nil || tc.Clang != "/h/llvm/bin/clang" || tc.Sysroot != "/h/sysroot" {
+	if err != nil || tc.Clang != filepath.Join("/h", "llvm", "bin", "clang") || tc.Sysroot != filepath.Join("/h", "sysroot") {
 		t.Fatalf("Locate with home: %+v, %v", tc, err)
 	}
 	t.Setenv(oracle.EnvClang, "/c")

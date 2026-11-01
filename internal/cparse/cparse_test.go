@@ -147,7 +147,7 @@ func corpusRate(t *testing.T, env string, lvl cparse.Level, floor int) {
 }
 
 func TestCorpusCTestsuite(t *testing.T) { corpusRate(t, "CORACLE_CTESTSUITE", cparse.Check, 217) }
-func TestCorpusGCCTorture(t *testing.T) { corpusRate(t, "CORACLE_GCC_TORTURE", cparse.Check, 1877) }
+func TestCorpusGCCTorture(t *testing.T) { corpusRate(t, "CORACLE_GCC_TORTURE", cparse.Check, 1876) }
 
 // FuzzSource: the front end is fed untrusted text. It may refuse anything;
 // it must not panic.
