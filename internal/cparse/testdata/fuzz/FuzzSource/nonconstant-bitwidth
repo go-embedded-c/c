@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("struct s { int a : QQQQQ3; } x = { .a = 1 };\n#define M(a, ...) a ## __VA_ARGS__\nint y = M(1,2);")

@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("#define CAT(a, ...) a ## __VA_ARGS__\n#define S(x) #x\nint y = CAT(1,2); const char *s = S(a b);\nenum { A = sizeof(long) * 2 };\nstruct t { unsigned f : 3; int g[A]; };")

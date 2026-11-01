@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("# coracle golden v1\r\n@ a\rb\r\nexit 1\r\nstdout \"\"\r\nstderr \"\"\r\n")

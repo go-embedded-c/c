@@ -1,0 +1,3 @@
+# The golden file and the C programs are compared byte for byte with what the
+# oracle read and wrote: no line-end conversion on any platform.
+* -text

@@ -1,0 +1,120 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Shape follows go-embedded-julia/julia's ci.yml: OS lanes, govulncheck, short
+# fuzz runs, and the live-oracle lane that provisions the pinned toolchain
+# (LLVM 23.1.4 + wasi-libc, `coracle toolchain`) and the two corpora. The
+# corpora are fetched by commit, never committed: the gcc testsuite is GPL
+# and c-testsuite licenses each test separately.
+env:
+  GCC_COMMIT: 5115c7e447fc07457443df874bf57840e8316d5f        # tag releases/gcc-15.2.0
+  CTESTSUITE_COMMIT: 5c7275656d751de0e68b2d340a95b5681858ed07
+
+jobs:
+  # vet, gofmt and race tests. Without the toolchain the live tests skip; the
+  # oracle lane below is the one that requires it.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.3
+      - run: go version
+      - run: go vet ./...
+      - name: gofmt
+        if: matrix.os != 'windows-latest'
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go build ./...
+      - run: go test -race -timeout=30m ./...
+
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.3
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+      - run: "$(go env GOPATH)/bin/govulncheck ./..."
+
+  # A short run of every fuzz target: the golden decoder reads files from a
+  # working tree, and cc/v4 is fed untrusted C.
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pkg: ./internal/golden, target: FuzzDecode }
+          - { pkg: ./internal/cparse, target: FuzzSource }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.3
+      - run: go test -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime 90s ${{ matrix.pkg }}
+
+  # The live oracle: clang 23.1.4 compiling to wasm32-wasip1 against wasi-libc,
+  # run under wazero. Every skipped-without-toolchain test runs here, with
+  # CORACLE_REQUIRE=1 turning a missing toolchain into a failure.
+  oracle:
+    runs-on: ubuntu-latest
+    env:
+      CORACLE_HOME: ${{ github.workspace }}/../coracle-home
+      CORACLE_REQUIRE: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.3
+      - name: Toolchain cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: ${{ github.workspace }}/../coracle-home
+          key: coracle-home-llvm-23.1.4-wasi-libc-d9ad2d11991c-${{ hashFiles('internal/provision/provision.go') }}
+      - run: sudo apt-get install -y -qq zstd cmake make
+      - name: Provision the pinned toolchain
+        run: go run ./cmd/coracle toolchain --home "$CORACLE_HOME" --jobs 4
+      - run: go run ./cmd/coracle version
+      - name: gcc 15.2.0 gcc.c-torture/execute (sparse, by commit)
+        run: |
+          git init -q "$RUNNER_TEMP/gcc"
+          git -C "$RUNNER_TEMP/gcc" sparse-checkout set --no-cone /gcc/testsuite/gcc.c-torture/execute /gcc/testsuite/gcc.dg/pr98304-1.c
+          git -C "$RUNNER_TEMP/gcc" fetch -q --depth 1 --filter=blob:none https://github.com/gcc-mirror/gcc "$GCC_COMMIT"
+          git -C "$RUNNER_TEMP/gcc" checkout -q FETCH_HEAD
+      - name: c-testsuite (by commit)
+        run: |
+          git init -q "$RUNNER_TEMP/c-testsuite"
+          git -C "$RUNNER_TEMP/c-testsuite" fetch -q --depth 1 https://github.com/c-testsuite/c-testsuite "$CTESTSUITE_COMMIT"
+          git -C "$RUNNER_TEMP/c-testsuite" checkout -q FETCH_HEAD
+      - name: Tests (oracle, goldens, cc/v4 over both corpora)
+        env:
+          CORACLE_CTESTSUITE: ${{ runner.temp }}/c-testsuite/tests/single-exec
+          CORACLE_GCC_TORTURE: ${{ runner.temp }}/gcc/gcc/testsuite/gcc.c-torture/execute
+        run: go test -count=1 -timeout=30m -v -run 'Oracle|Golden|Corpus|CTestsuite|Headers|Predefined|Run|Programs' ./...
+      - name: The oracle over the gcc torture suite
+        run: go run ./cmd/coracle corpus --dir "$RUNNER_TEMP/gcc/gcc/testsuite/gcc.c-torture/execute" --out gcc-torture.tsv
+      - name: The goldens regenerate unchanged on linux
+        run: |
+          go run ./cmd/coracle golden
+          go run ./cmd/coracle predefined
+          git diff --stat --exit-code
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gcc-torture-oracle
+          path: gcc-torture.tsv
