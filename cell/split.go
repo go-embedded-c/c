@@ -48,6 +48,7 @@ type scanner struct {
 	src       []byte
 	off       int
 	line, col int
+	maxDepth  int
 }
 
 func (s *scanner) peekByte(k int) byte {
@@ -214,8 +215,11 @@ func (s *scanner) literal() error {
 //
 // Any other '}' that closes the outermost bracket ends the chunk: a function
 // definition, a compound statement, the body of if/for/while/switch.
-func Split(src []byte) ([]Chunk, error) {
-	s := &scanner{src: src, line: 1, col: 1}
+func Split(src []byte) ([]Chunk, error) { return split(src, MaxDepth) }
+
+// split is Split with brackets nested at most depth deep.
+func split(src []byte, depth int) ([]Chunk, error) {
+	s := &scanner{src: src, line: 1, col: 1, maxDepth: depth}
 	var chunks []Chunk
 	atLineStart := true
 	for {
@@ -338,8 +342,8 @@ func (s *scanner) code() (Chunk, error) {
 		outside := len(stack) == 0
 		switch t.punct {
 		case '(', '[', '{':
-			if len(stack) == MaxDepth {
-				return c, s.errorf(t.line, t.col, "brackets nested deeper than %d", MaxDepth)
+			if len(stack) == s.maxDepth {
+				return c, s.errorf(t.line, t.col, "brackets nested deeper than %d", s.maxDepth)
 			}
 			if t.punct == '{' && outside {
 				declBrace = assigned || tagged

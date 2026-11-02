@@ -148,6 +148,45 @@ func TestUsesSkipsMembers(t *testing.T) {
 	}
 }
 
+// TestDiagnosticOffset: Offset is the byte of Line:Col in the cell, -1 for an
+// error outside it; a tab counts one byte, as cc/v4 counts columns.
+func TestDiagnosticOffset(t *testing.T) {
+	for _, tc := range []struct {
+		src  string
+		want int
+	}{
+		{"int x = ;", 8},
+		{"\n\n\tprintf(1;", 9},
+		{"#include <nosuch.h>\n", 0},
+	} {
+		a := Analyze([]byte(tc.src), Context{}, Limits{})
+		if len(a.Diagnostics) == 0 || a.Diagnostics[0].Offset != tc.want {
+			t.Errorf("%q: %v, want offset %d", tc.src, a.Diagnostics, tc.want)
+		}
+	}
+	a := Analyze([]byte("int y = x;"), Context{}, Limits{})
+	for _, d := range a.Diagnostics {
+		if (d.Line == 0) != (d.Offset == -1) {
+			t.Errorf("%+v: Offset and Line disagree", d)
+		}
+	}
+}
+
+// TestMaxDepth: a smaller MaxDepth is honoured, a larger one is not.
+func TestMaxDepth(t *testing.T) {
+	src := []byte("int x = " + strings.Repeat("(", 10) + "1" + strings.Repeat(")", 10) + ";")
+	if a := Analyze(src, Context{}, Limits{MaxDepth: 5}); len(a.Diagnostics) == 0 || !strings.Contains(a.Diagnostics[0].Msg, "deeper than 5") {
+		t.Errorf("MaxDepth 5: %v", a.Diagnostics)
+	}
+	if a := Analyze(src, Context{}, Limits{MaxDepth: 10}); len(a.Diagnostics) != 0 {
+		t.Errorf("MaxDepth 10: %v", a.Diagnostics)
+	}
+	deep := []byte("int x = " + strings.Repeat("(", MaxDepth+1) + "1" + strings.Repeat(")", MaxDepth+1) + ";")
+	if a := Analyze(deep, Context{}, Limits{MaxDepth: 10_000}); len(a.Diagnostics) == 0 {
+		t.Error("MaxDepth 10000 lifted the package ceiling")
+	}
+}
+
 func TestDiagnostics(t *testing.T) {
 	for _, tc := range []struct{ src, want string }{
 		{"int x = ;", "1:9: unexpected ';'"},

@@ -26,40 +26,35 @@ func hostHeader(t *testing.T) string {
 	return filepath.ToSlash(rel)
 }
 
-// TestGuardIsNotVacuous shows the defect the guard exists for: cc/v4, given
-// the cell without the guard, reads a host file through its os.Open
-// fallback, by a direct path and by a macro that rewrites a word of an
-// embedded header's #include. Analyze refuses both cells.
-func TestGuardIsNotVacuous(t *testing.T) {
+// TestHostFilesUnreachable: a cell that names a host file is refused twice
+// over. The directive guard refuses it, and internal/cc, given the cell
+// without the guard, no longer falls back to os.Open for a file missing from
+// Config.FS (go-embedded-c/c#4). The control is the same parse with FS nil,
+// cc/v4's host mode, which does read the file: the test can see the defect.
+func TestHostFilesUnreachable(t *testing.T) {
 	rel := hostHeader(t)
-	cfg, err := config()
+	cfg, err := config(DefaultLimits)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The search directories are "include/clang" and "include/wasi": two more
+	// The search directories are "include/all" and "include/wasi": two more
 	// ".." reach the working directory.
-	up := "../../" + rel
-	for _, tc := range []struct{ name, cell string }{
-		{"direct", "#include \"" + up + ".h\"\nint *p = &host_secret;\n"},
-		{"macro", "#define stdio " + up + "\n#include <stdio.h>\nint *p = &host_secret;\n"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := parse(cfg, tc.cell, true)
-			if tc.name == "macro" && err != nil {
-				// cc/v4 may space the expanded tokens apart; the direct case
-				// is the proof, this one documents the second path.
-				t.Logf("macro path not taken by cc/v4: %v", firstLine(err.Error()))
-			} else if err != nil {
-				t.Fatalf("without the guard cc/v4 did not read the host file: %v", firstLine(err.Error()))
-			}
-			a := Analyze([]byte(tc.cell), Context{}, Limits{})
-			if len(a.Diagnostics) == 0 {
-				t.Fatalf("Analyze accepted a cell that reads %s.h from the host", rel)
-			}
-			if strings.Contains(a.Diagnostics[0].Msg, "undefined") {
-				t.Fatalf("refused for the wrong reason: %v", a.Diagnostics)
-			}
-		})
+	cell := "#include \"../../" + rel + ".h\"\nint *p = &host_secret;\n"
+
+	host := *cfg
+	host.FS = nil
+	host.IncludePaths = []string{"."}
+	host.SysIncludePaths = []string{"."}
+	if _, err := parse(&host, "#include \""+rel+".h\"\nint *p = &host_secret;\n", true); err != nil {
+		t.Fatalf("control: with FS nil cc did not read the host file: %v", firstLine(err.Error()))
+	}
+	_, err = parse(cfg, cell, true)
+	if err == nil || !strings.Contains(err.Error(), "include file not found") {
+		t.Fatalf("internal/cc reached the host file system: %v", err)
+	}
+	a := Analyze([]byte(cell), Context{}, Limits{})
+	if len(a.Diagnostics) == 0 || strings.Contains(a.Diagnostics[0].Msg, "undefined") {
+		t.Fatalf("Analyze did not refuse the include itself: %v", a.Diagnostics)
 	}
 }
 

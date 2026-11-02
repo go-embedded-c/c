@@ -3,7 +3,7 @@ package cell
 import (
 	"strings"
 
-	"modernc.org/cc/v4"
+	"github.com/go-embedded-c/c/internal/cc"
 )
 
 // hoisted is a file-scope object declaration split in two, as cling does

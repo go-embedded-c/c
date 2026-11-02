@@ -82,18 +82,35 @@ Oracle over the corpora (`-O0`, `-std=gnu89` for gcc, `gnu17` for c-testsuite):
 
 ### cc/v4 smoke test
 
-`internal/cparse` configures modernc.org/cc/v4 v4.30.5 by hand — a wasm32 `ABI`
+`internal/cparse` configures the front end by hand — a wasm32 `ABI`
 literal, the predefined macros of the oracle clang, include paths into the
 sysroot, no host compiler (`NewConfig` is not used). Files taken:
 
 | corpus | preprocess + parse | + type check |
 |---|---|---|
-| gcc torture execute | 1 877 / 1 890 | 1 877 / 1 890 |
+| gcc torture execute | 1 881 / 1 890 | 1 881 / 1 890 |
 | c-testsuite | 218 / 220 | 217 / 220 |
 
-Tests hold these as floors. cc/v4 panics on some malformed input (three
-reproducers are kept in `knownPanics` and the fuzz corpus); `cparse` recovers
-every panic into a `*PanicError`.
+Of the nine gcc refusals, eight are wasi-libc's own `#error` (`signal.h`,
+`setjmp.h`, `sys/mman.h`) and one is C23 `f(...)`. Tests hold these as floors.
+cc/v4 panics on some malformed input (three reproducers are kept in
+`knownPanics` and the fuzz corpus); `cparse` recovers every panic into a
+`*PanicError`.
+
+### The front end: `internal/cc`
+
+The front end is modernc.org/cc/v4 v4.30.5 (BSD-3-Clause, `internal/cc/LICENSE`),
+copied and patched by `go run ./internal/cmd/vendorcc --cc <module dir>`. Each
+patch must match exactly once, so a new cc/v4 release cannot skip one, and
+`TestInternalCCIsGenerated` checks the copy against the generator. The patches:
+
+- `Config.MaxExpansion` bounds the tokens macro replacement produces (#11).
+  Without it, `#define D(a) ((a)+(a))` nested 40 deep, 154 bytes, asks for
+  2^40 tokens and never returns.
+- A file missing from `Config.FS` is not opened, nor probed by
+  `__has_include`, on the host file system (#4).
+
+Upgrading cc/v4 means bumping `vendorcc.Version` and rerunning it.
 
 ## Cells (M1, in progress)
 
@@ -101,8 +118,8 @@ Package `cell` analyses a notebook C cell without a host compiler or a file
 system, so it runs unchanged in the wasm playground:
 
 ```go
-a := cell.Analyze(src, ctx, cell.Limits{})
-// a.Diagnostics: line:col in the cell
+a := cell.Analyze(src, ctx, cell.Limits{}) // zero fields take DefaultLimits
+// a.Diagnostics: line:col and byte offset in the cell
 // a.Defines:     file-scope names, with their kind (function, variable, typedef, tag, enumerator, macro)
 // a.Uses:        names defined by earlier cells that this cell reads
 // a.Decls, a.Stmts: the cell's chunks, classified
@@ -126,12 +143,16 @@ The headers a cell can `#include` are embedded (`headers`): wasi-libc's for
 wasm32-wasip1 and clang's own C headers, at the oracle's pinned revisions.
 `setjmp.h` and `signal.h` stop with wasi-libc's `#error`, as under clang.
 
-**Security.** cc/v4 falls back to the host file system for a file it does not
-find in its `fs.FS`, so on the desktop a cell could `#include` a host file.
-`cell` refuses that before cc/v4 runs: only literal includes of embedded
-headers, no `#line`, `#include_next` or `__has_include`, and no `#define` of a
-word that occurs in an include path. `TestGuardIsNotVacuous` shows cc/v4
-reading a host file when the guard is bypassed.
+**Security.** A cell is untrusted text. `Limits` bound it: 1 MiB of source,
+256 levels of brackets, 65 536 tokens of macro expansion. The last limit stops
+expansion bombs in well under a second (`TestExpansionBombsRefused`). A cell
+cannot read the host file system, by two independent layers:
+
+- `cell` refuses before the front end runs: only literal includes of embedded
+  headers, no `#line`, `#include_next` or `__has_include`, and no `#define` of
+  a word that occurs in an include path.
+- `internal/cc` does not fall back to the host. `TestHostFilesUnreachable`
+  checks both layers, against a control that reads the host file.
 
 ## Not yet
 

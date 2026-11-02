@@ -34,11 +34,16 @@ jobs:
         with:
           go-version: 1.27.3
       - run: go version
-      - run: go vet ./...
+      # internal/cc is cc/v4 as published: three `return` after infinite loops.
+      - run: go vet -unreachable=false ./...
       - name: gofmt
         if: matrix.os != 'windows-latest'
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go build ./...
+      # The source internal/cc is generated from, so that TestInternalCCIsGenerated
+      # runs (not on Windows, where the checkout's line endings differ).
+      - if: matrix.os != 'windows-latest'
+        run: go mod download modernc.org/cc/v4@v4.30.5
       - run: go test -race -timeout=30m ./...
 
   govulncheck:

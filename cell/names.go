@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"modernc.org/cc/v4"
+	"github.com/go-embedded-c/c/internal/cc"
 )
 
 // defines lists the file-scope names the cell's declarations and #defines
