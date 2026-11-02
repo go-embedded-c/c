@@ -114,8 +114,11 @@ func TestGeneratePredefinedMatchesCommitted(t *testing.T) {
 	}
 }
 
-// The corpora: how many files cc/v4 takes. The floors are the rates measured
-// when M0 was written; a front-end bump must not lower them.
+// The corpora: how many files cc/v4 takes. A front-end bump must not lower
+// the floors. gcc 15.2.0 torture: 1881 / 1890. Eight of the nine refusals are
+// wasi-libc's own #error (signal.h, setjmp.h, sys/mman.h), which clang
+// refuses too; pr117432.c uses C23 `f(...)` with no named parameter, which
+// cc/v4 does not take. The refused files are logged, the first twenty.
 func corpusRate(t *testing.T, env string, lvl cparse.Level, floor int) {
 	dir := oracletest.Dir(t, env)
 	tc := oracletest.Require(t)
@@ -134,10 +137,12 @@ func corpusRate(t *testing.T, env string, lvl cparse.Level, floor int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ok := 0
+	ok, refused := 0, 0
 	for _, p := range files {
 		if err := f.File(p, lvl); err == nil {
 			ok++
+		} else if refused++; refused <= 20 {
+			t.Logf("refused: %s: %v", p, err)
 		}
 	}
 	t.Logf("cc %s over %s: %d / %d files", cparse.Version, env, ok, len(files))
@@ -147,7 +152,7 @@ func corpusRate(t *testing.T, env string, lvl cparse.Level, floor int) {
 }
 
 func TestCorpusCTestsuite(t *testing.T) { corpusRate(t, "CORACLE_CTESTSUITE", cparse.Check, 217) }
-func TestCorpusGCCTorture(t *testing.T) { corpusRate(t, "CORACLE_GCC_TORTURE", cparse.Check, 1876) }
+func TestCorpusGCCTorture(t *testing.T) { corpusRate(t, "CORACLE_GCC_TORTURE", cparse.Check, 1881) }
 
 // FuzzSource: the front end is fed untrusted text. It may refuse anything;
 // it must not panic.
