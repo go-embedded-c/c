@@ -96,6 +96,9 @@ const (
 	wrapperName = "<wrapper>"
 )
 
+// headerFS is the file system cc/v4 reads; a test counts its misses.
+var headerFS = headers.FS
+
 func config() (*cc.Config, error) {
 	abi, err := cparse.ABI()
 	if err != nil {
@@ -103,7 +106,7 @@ func config() (*cc.Config, error) {
 	}
 	return &cc.Config{
 		ABI:             abi,
-		FS:              headers.FS(),
+		FS:              headerFS(),
 		Predefined:      cparse.Predefined(),
 		IncludePaths:    headers.SysIncludePaths,
 		SysIncludePaths: headers.SysIncludePaths,

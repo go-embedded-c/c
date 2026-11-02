@@ -19,7 +19,7 @@
  * `stdatomic.h` header requires C++23 or newer.
  */
 #if __STDC_HOSTED__ &&                                                         \
-    __has_include_next(<stdatomic.h>) &&                                       \
+    0 /* __has_include_next(<stdatomic.h>): wasi-libc has none (genheaders) */ &&                                       \
     (!defined(_MSC_VER) || (defined(__cplusplus) && __cplusplus >= 202002L))
 # include_next <stdatomic.h>
 #else
