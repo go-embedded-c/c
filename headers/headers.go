@@ -41,7 +41,11 @@ func FS() fs.FS { return overlay{} }
 
 type overlay struct{}
 
+// Open accepts '\' as a separator: on Windows cc/v4 builds paths with
+// filepath.Join, and its __has_include lookup (cpp.go hasFile) passes them to
+// the fs.FS without filepath.ToSlash. No embedded name contains a '\'.
 func (overlay) Open(name string) (fs.File, error) {
+	name = strings.ReplaceAll(name, `\`, "/")
 	if rest, ok := strings.CutPrefix(name, AllDir+"/"); ok {
 		if f, err := tree.Open(ClangDir + "/" + rest); err == nil {
 			return f, nil
