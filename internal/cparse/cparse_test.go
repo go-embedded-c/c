@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-embedded-c/c/internal/cc"
 	"github.com/go-embedded-c/c/internal/cparse"
 	"github.com/go-embedded-c/c/internal/oracle/oracletest"
-	"modernc.org/cc/v4"
 )
 
 func front(t testing.TB) *cparse.Front {
@@ -173,7 +173,7 @@ func FuzzSource(f *testing.F) {
 			// v4.30.5 panics on some malformed input, see knownPanics.
 			// Source recovers it, which is what this target checks; a
 			// panic outside cc, a hang or a crash still fails.
-			if strings.Contains(pe.Stack, "modernc.org/cc/v4.") {
+			if strings.Contains(pe.Stack, "github.com/go-embedded-c/c/internal/cc.") {
 				t.Skip("known: cc/v4 panics on malformed input; recovered")
 			}
 			t.Fatalf("%v\n%s", pe, pe.Stack)

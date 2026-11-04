@@ -18,10 +18,11 @@ import (
 	"path/filepath"
 	"runtime/debug"
 
-	"modernc.org/cc/v4"
+	"github.com/go-embedded-c/c/internal/cc"
 )
 
-// Version is the pinned front end.
+// Version is the pinned front end: internal/cc is modernc.org/cc/v4 at this
+// version, patched (internal/cmd/vendorcc).
 const Version = "v4.30.5"
 
 //go:embed predefined.h

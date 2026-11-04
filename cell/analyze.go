@@ -6,9 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"modernc.org/cc/v4"
-
 	"github.com/go-embedded-c/c/headers"
+	"github.com/go-embedded-c/c/internal/cc"
 	"github.com/go-embedded-c/c/internal/cparse"
 )
 
@@ -36,10 +35,12 @@ type Name struct {
 	Line, Col int
 }
 
-// Diagnostic is an error at a line and column of the cell (1-based). Line is
-// 0 when the error is not in the cell (a header, say); Msg then says where.
+// Diagnostic is an error at a line and column of the cell (1-based), and at
+// byte Offset of it. Line is 0 and Offset -1 when the error is not in the
+// cell (a header, say); Msg then says where.
 type Diagnostic struct {
 	Line, Col int
+	Offset    int
 	Msg       string
 }
 
@@ -47,11 +48,16 @@ func (d Diagnostic) String() string { return fmt.Sprintf("%d:%d: %s", d.Line, d.
 
 // Limits bound the work of one analysis.
 type Limits struct {
-	MaxBytes int // cell size; DefaultLimits.MaxBytes when 0
+	MaxBytes  int // cell size; DefaultLimits.MaxBytes when 0
+	MaxDepth  int // bracket nesting; MaxDepth when 0, and never more
+	MaxTokens int // tokens macro replacement may produce; DefaultLimits.MaxTokens when 0
 }
 
-// DefaultLimits are used for zero fields.
-var DefaultLimits = Limits{MaxBytes: 1 << 20}
+// DefaultLimits are used for zero fields. MaxTokens is far above what the
+// standard headers and ordinary macros produce, and stops an expansion bomb
+// (`#define D(a) ((a)+(a))` nested 40 deep is 2^40 tokens) in well under a
+// second.
+var DefaultLimits = Limits{MaxBytes: 1 << 20, MaxDepth: MaxDepth, MaxTokens: 1 << 16}
 
 // Context is what earlier cells left for later ones: their declarations as C
 // text, and the names they define.
@@ -99,7 +105,7 @@ const (
 // headerFS is the file system cc/v4 reads; a test counts its misses.
 var headerFS = headers.FS
 
-func config() (*cc.Config, error) {
+func config(lim Limits) (*cc.Config, error) {
 	abi, err := cparse.ABI()
 	if err != nil {
 		return nil, err
@@ -111,6 +117,7 @@ func config() (*cc.Config, error) {
 		IncludePaths:    headers.SysIncludePaths,
 		SysIncludePaths: headers.SysIncludePaths,
 		UnsignedEnums:   true,
+		MaxExpansion:    lim.MaxTokens,
 	}, nil
 }
 
@@ -118,15 +125,33 @@ func config() (*cc.Config, error) {
 // which of its chunks are declarations and which are statements, and reports
 // the names it defines and uses. It never panics on hostile input.
 func Analyze(src []byte, ctx Context, lim Limits) *Analysis {
+	a := analyze(src, ctx, lim)
+	lines := lineStarts(src)
+	for i, d := range a.Diagnostics {
+		a.Diagnostics[i].Offset = -1
+		if d.Line > 0 {
+			a.Diagnostics[i].Offset = min(offset(lines, d.Line, d.Col), len(src))
+		}
+	}
+	return a
+}
+
+func analyze(src []byte, ctx Context, lim Limits) *Analysis {
 	if lim.MaxBytes == 0 {
 		lim.MaxBytes = DefaultLimits.MaxBytes
+	}
+	if lim.MaxDepth <= 0 || lim.MaxDepth > MaxDepth {
+		lim.MaxDepth = MaxDepth
+	}
+	if lim.MaxTokens == 0 {
+		lim.MaxTokens = DefaultLimits.MaxTokens
 	}
 	a := &Analysis{}
 	if len(src) > lim.MaxBytes {
 		a.Diagnostics = []Diagnostic{{Line: 1, Col: 1, Msg: fmt.Sprintf("cell is %d bytes, the limit is %d", len(src), lim.MaxBytes)}}
 		return a
 	}
-	chunks, err := Split(src)
+	chunks, err := split(src, lim.MaxDepth)
 	if err != nil {
 		se := err.(*SyntaxError)
 		a.Diagnostics = []Diagnostic{{Line: se.Line, Col: se.Col, Msg: se.Msg}}
@@ -135,7 +160,7 @@ func Analyze(src []byte, ctx Context, lim Limits) *Analysis {
 	if a.Diagnostics = vet(src, chunks); len(a.Diagnostics) != 0 {
 		return a
 	}
-	cfg, err := config()
+	cfg, err := config(lim)
 	if err != nil {
 		a.Diagnostics = []Diagnostic{{Msg: err.Error()}}
 		return a
