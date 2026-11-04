@@ -9,12 +9,14 @@ import (
 )
 
 // defines lists the file-scope names the cell's declarations and #defines
-// introduce, in source order.
-func defines(src []byte, ast *cc.AST, chunks []Chunk) []Name {
+// introduce, in source order. inits holds the cell positions of the
+// declarators written with an initializer: ast is the hoisted translation
+// unit, where those initializers have become statements.
+func defines(src []byte, ast *cc.AST, inits map[position]bool, chunks []Chunk) []Name {
 	var r []Name
-	add := func(name string, k Kind, n cc.Node) {
+	add := func(name string, k Kind, def Def, n cc.Node) {
 		if p, ok := cellPosition(n); ok && name != "" {
-			r = append(r, Name{Name: name, Kind: k, Line: p.Line, Col: p.Column})
+			r = append(r, Name{Name: name, Kind: k, Def: def, Line: p.Line, Col: p.Column})
 		}
 	}
 	for l := ast.TranslationUnit; l != nil; l = l.TranslationUnit {
@@ -26,23 +28,32 @@ func defines(src []byte, ast *cc.AST, chunks []Chunk) []Name {
 		case cc.ExternalDeclarationFuncDef:
 			fd := ed.FunctionDefinition
 			specifierNames(fd.DeclarationSpecifiers, add)
-			add(fd.Declarator.Name(), Function, fd.Declarator)
+			add(fd.Declarator.Name(), Function, Definition, fd.Declarator)
 		case cc.ExternalDeclarationDecl:
 			d := ed.Declaration
 			if d.Case != cc.DeclarationDecl {
 				continue
 			}
 			specifierNames(d.DeclarationSpecifiers, add)
+			if d.InitDeclaratorList == nil {
+				forwardTag(d.DeclarationSpecifiers, add)
+			}
+			extern := storageClass(d, cc.StorageClassSpecifierExtern)
 			for il := d.InitDeclaratorList; il != nil; il = il.InitDeclaratorList {
 				dr := il.InitDeclarator.Declarator
-				k := Variable
+				p, _ := cellPosition(dr)
 				switch {
 				case dr.IsTypename():
-					k = Typedef
+					add(dr.Name(), Typedef, Definition, dr)
 				case isFunction(dr.Type()):
-					k = Function
+					add(dr.Name(), Function, Declaration, dr)
+				case inits[p]:
+					add(dr.Name(), Variable, Definition, dr) // 6.9.2p1, extern included
+				case extern:
+					add(dr.Name(), Variable, Declaration, dr)
+				default:
+					add(dr.Name(), Variable, Tentative, dr) // 6.9.2p2
 				}
-				add(dr.Name(), k, dr)
 			}
 		}
 	}
@@ -75,7 +86,7 @@ func macroNames(src []byte, chunks []Chunk) []Name {
 				i++
 			}
 			if i > 0 {
-				r = append(r, Name{Name: rest[:i], Kind: Macro, Line: d.Line, Col: d.Col})
+				r = append(r, Name{Name: rest[:i], Kind: Macro, Def: Definition, Line: d.Line, Col: d.Col})
 			}
 		}
 	}
@@ -87,9 +98,50 @@ func isFunction(t cc.Type) bool {
 	return ok
 }
 
+// initialised returns the cell positions of the declarators written with an
+// initializer, read from the translation unit before hoisting.
+func initialised(ast *cc.AST) map[position]bool {
+	r := map[position]bool{}
+	for l := ast.TranslationUnit; l != nil; l = l.TranslationUnit {
+		ed := l.ExternalDeclaration
+		if ed.Case != cc.ExternalDeclarationDecl || ed.Declaration.Case != cc.DeclarationDecl {
+			continue
+		}
+		for il := ed.Declaration.InitDeclaratorList; il != nil; il = il.InitDeclaratorList {
+			if il.InitDeclarator.Case == cc.InitDeclaratorInit {
+				if p, ok := cellPosition(il.InitDeclarator.Declarator); ok {
+					r[p] = true
+				}
+			}
+		}
+	}
+	return r
+}
+
+func storageClass(d *cc.Declaration, c cc.StorageClassSpecifierCase) bool {
+	for ds := d.DeclarationSpecifiers; ds != nil; ds = ds.DeclarationSpecifiers {
+		if ds.StorageClassSpecifier != nil && ds.StorageClassSpecifier.Case == c {
+			return true
+		}
+	}
+	return false
+}
+
+// forwardTag reports the tag of `struct s;` or `union u;`, a declaration with
+// no declarator and no body (6.7.2.3p7): it declares the tag, defines nothing.
+func forwardTag(ds *cc.DeclarationSpecifiers, add func(string, Kind, Def, cc.Node)) {
+	for ; ds != nil; ds = ds.DeclarationSpecifiers {
+		if ts := ds.TypeSpecifier; ts != nil && ts.Case == cc.TypeSpecifierStructOrUnion {
+			if s := ts.StructOrUnionSpecifier; s.Case == cc.StructOrUnionSpecifierTag {
+				add(s.StructOrUnion.Token.SrcStr()+" "+s.Token.SrcStr(), Tag, Declaration, s)
+			}
+		}
+	}
+}
+
 // specifierNames reports the tags and enumerators a declaration's specifiers
 // define (a struct, union or enum with a body).
-func specifierNames(ds *cc.DeclarationSpecifiers, add func(string, Kind, cc.Node)) {
+func specifierNames(ds *cc.DeclarationSpecifiers, add func(string, Kind, Def, cc.Node)) {
 	for ; ds != nil; ds = ds.DeclarationSpecifiers {
 		ts := ds.TypeSpecifier
 		if ts == nil {
@@ -99,7 +151,7 @@ func specifierNames(ds *cc.DeclarationSpecifiers, add func(string, Kind, cc.Node
 		case cc.TypeSpecifierStructOrUnion:
 			s := ts.StructOrUnionSpecifier
 			if s.Case == cc.StructOrUnionSpecifierDef && s.Token.SrcStr() != "" {
-				add(s.StructOrUnion.Token.SrcStr()+" "+s.Token.SrcStr(), Tag, s)
+				add(s.StructOrUnion.Token.SrcStr()+" "+s.Token.SrcStr(), Tag, Definition, s)
 			}
 		case cc.TypeSpecifierEnum:
 			e := ts.EnumSpecifier
@@ -107,10 +159,10 @@ func specifierNames(ds *cc.DeclarationSpecifiers, add func(string, Kind, cc.Node
 				continue
 			}
 			if e.Token2.SrcStr() != "" {
-				add("enum "+e.Token2.SrcStr(), Tag, e)
+				add("enum "+e.Token2.SrcStr(), Tag, Definition, e)
 			}
 			for el := e.EnumeratorList; el != nil; el = el.EnumeratorList {
-				add(el.Enumerator.Token.SrcStr(), Enumerator, el.Enumerator)
+				add(el.Enumerator.Token.SrcStr(), Enumerator, Definition, el.Enumerator)
 			}
 		}
 	}

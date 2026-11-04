@@ -28,12 +28,35 @@ var kindNames = [...]string{"variable", "function", "typedef", "tag", "enumerato
 
 func (k Kind) String() string { return kindNames[k] }
 
-// Name is a name a cell defines, at its line and column in the cell.
+// Name is a name a cell declares, at its line and column in the cell.
 type Name struct {
 	Name      string
 	Kind      Kind
+	Def       Def
 	Line, Col int
 }
+
+// Def says whether a declaration defines its name (C11 6.7p5, 6.9.2).
+type Def int
+
+// The kinds of declaration.
+const (
+	// Definition: a function with its body, an object with an initializer
+	// (`extern` or not), a struct, union or enum with its body, a typedef, an
+	// enumerator, a macro.
+	Definition Def = iota
+	// Tentative: a file-scope object without an initializer, declared with no
+	// storage class or with `static` (`int x;`); it defines the object when
+	// no Definition does (6.9.2p2).
+	Tentative
+	// Declaration: a function prototype, an `extern` object without an
+	// initializer, a forward tag (`struct s;`). It defines nothing.
+	Declaration
+)
+
+var defNames = [...]string{"definition", "tentative definition", "declaration"}
+
+func (d Def) String() string { return defNames[d] }
 
 // Diagnostic is an error at a line and column of the cell (1-based), and at
 // byte Offset of it. Line is 0 and Offset -1 when the error is not in the
@@ -224,6 +247,7 @@ func analyze(src []byte, ctx Context, lim Limits) *Analysis {
 		}
 		stmt[i], asDecl[i] = true, d
 	}
+	parsed := ast // before hoisting: the initialisers are still in place
 	hoists := map[int]hoisted{}
 	for l := ast.TranslationUnit; l != nil; l = l.TranslationUnit {
 		ed := l.ExternalDeclaration
@@ -256,7 +280,7 @@ func analyze(src []byte, ctx Context, lim Limits) *Analysis {
 		a.Diagnostics = cellDiagnostics(diagnostics(err))
 		return a
 	}
-	a.Defines = defines(src, ast, chunks)
+	a.Defines = defines(src, ast, initialised(parsed), chunks)
 	a.Uses = uses(src, chunks, ctx, a.Defines)
 	a.prelude = preludeOf(src, lines, ast, chunks, stmt, hoists)
 	return a
