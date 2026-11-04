@@ -79,6 +79,63 @@ func TestDefinesAndUses(t *testing.T) {
 	}
 }
 
+// TestDef: each name says whether its declaration defines it (C11 6.7p5,
+// 6.9.2). Hoisting must not turn `int x = 1;` into a tentative definition.
+func TestDef(t *testing.T) {
+	for _, tc := range []struct {
+		src  string
+		want []string
+	}{
+		{"int f(int);", []string{"declaration f"}},
+		{"extern int f(int);", []string{"declaration f"}},
+		{"int f(int a) { return a; }", []string{"definition f"}},
+		{"int x;", []string{"tentative definition x"}},
+		{"static int x;", []string{"tentative definition x"}},
+		{"extern int x;", []string{"declaration x"}},
+		{"int x = 1;", []string{"definition x"}},
+		{"extern int x = 1;", []string{"definition x"}},
+		{"int a = 1, b, c = 2;", []string{"definition a", "tentative definition b", "definition c"}},
+		{"int x = 1; x++;", []string{"definition x"}},
+		{"struct s;", []string{"declaration struct s"}},
+		{"struct s *p;", []string{"tentative definition p"}},
+		{"struct s { int a; };", []string{"definition struct s"}},
+		{"enum e { A };", []string{"definition enum e", "definition A"}},
+		{"typedef int T;", []string{"definition T"}},
+		{"#define M 1\n", []string{"definition M"}},
+	} {
+		a := mustAnalyze(t, tc.src, Context{})
+		var got []string
+		for _, n := range a.Defines {
+			got = append(got, n.Def.String()+" "+n.Name)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%q: %q, want %q", tc.src, got, tc.want)
+		}
+	}
+}
+
+// TestDefAcrossCells: a prototype, then the definition in a later cell, is
+// ordinary C; a later declaration of a conflicting type is still the C front
+// end's diagnostic, because the context carries the earlier declarations.
+func TestDefAcrossCells(t *testing.T) {
+	ctx := Context{}.Extend(mustAnalyze(t, "int f(int);\nextern int x;\n", Context{}))
+	a := mustAnalyze(t, "int f(int a) { return a + x; }\nint x = 3;\n", ctx)
+	if len(a.Defines) != 2 || a.Defines[0].Def != Definition || a.Defines[1].Def != Definition {
+		t.Errorf("defines %+v", a.Defines)
+	}
+	for _, src := range []string{"double f(int);", "double x;"} {
+		b := Analyze([]byte(src), ctx, Limits{})
+		if len(b.Diagnostics) == 0 {
+			t.Errorf("%q after `int f(int); extern int x;` was accepted", src)
+		} else if d := b.Diagnostics[0]; d.Line != 1 {
+			t.Errorf("%q: refused at %v, not at the redeclaration", src, d)
+		}
+		if b := Analyze([]byte(src), Context{}, Limits{}); len(b.Diagnostics) != 0 {
+			t.Errorf("control: %q alone refused: %v", src, b.Diagnostics)
+		}
+	}
+}
+
 func TestHoist(t *testing.T) {
 	for _, tc := range []struct {
 		src, decl, stmt string // decl/stmt: the hoisted chunk's two texts; "" = not hoisted

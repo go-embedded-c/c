@@ -121,6 +121,7 @@ system, so it runs unchanged in the wasm playground:
 a := cell.Analyze(src, ctx, cell.Limits{}) // zero fields take DefaultLimits
 // a.Diagnostics: line:col and byte offset in the cell
 // a.Defines:     file-scope names, with their kind (function, variable, typedef, tag, enumerator, macro)
+//                and Def: Definition, Tentative (`int x;`) or Declaration (a prototype, `extern int x;`, `struct s;`)
 // a.Uses:        names defined by earlier cells that this cell reads
 // a.Decls, a.Stmts: the cell's chunks, classified
 ctx = ctx.Extend(a)    // what later cells see
