@@ -306,6 +306,9 @@ func newScannerSource(fset *fset, src Source) (s *scannerSource, err error) {
 
 // pos returns a token.Position representing off.
 func (s *scannerSource) pos(off uint32) token.Position {
+	if off > s.len {
+		off = s.len
+	}
 	return s.file.PositionFor(token.Pos(off)+s.pos0, true)
 }
 
@@ -629,7 +632,7 @@ func (s *scanner) characterConstant(c rune) Token {
 // [0]A.1.5
 func (s *scanner) cChar() bool {
 	switch s.rune() {
-	case '\'', '\n':
+	case '\'', '\n', eof:
 		return false
 	case '\\':
 		s.shift()
@@ -662,7 +665,7 @@ func (s *scanner) stringLiteral(c rune) Token {
 // [0]A.1.6
 func (s *scanner) sChar() bool {
 	switch s.rune() {
-	case '"', '\n':
+	case '"', '\n', eof:
 		return false
 	case '\\':
 		s.shift()
@@ -910,6 +913,9 @@ func (s *scanner) identifier() Token {
 // fail reports an error at current position, closes s and returns an EOF
 // Token.
 func (s *scanner) fail() Token {
+	if s.off > s.s.len {
+		s.off = s.s.len
+	}
 	s.eh("%v: unexpected rune: %s (%s)", s.pos(s.off), runeName(s.rune()), origin(2))
 	s.closed = true
 	return newToken(s.s, eof, s.off, s.off, 0)

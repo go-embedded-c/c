@@ -21,3 +21,46 @@ func (c *cpp) budget(t Token, r cppTokens) cppTokens {
 	}
 	return r
 }
+
+// maxEOFShifts bounds how often the parser may shift the end of input: an
+// error-recovery loop that does so without progress would never end.
+const maxEOFShifts = 1 << 12
+
+type noProgressError struct{ pos string }
+
+func (e *noProgressError) Error() string {
+	return e.pos + ": unexpected EOF (the parser made no progress)"
+}
+
+func (p *parser) noProgress(t Token) {
+	if p.eofShifts++; p.eofShifts > maxEOFShifts {
+		panic(&noProgressError{t.Position().String()})
+	}
+}
+
+// parseBounded is parse, with a stop for no progress turned into an error
+// (go-embedded-c patch).
+func (p *parser) parseBounded() (ast *AST, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			e, ok := r.(*noProgressError)
+			if !ok {
+				panic(r)
+			}
+			ast, err = nil, e
+		}
+	}()
+	return p.parse()
+}
+
+// nonNilFields drops the members whose check failed and returned no field;
+// the error is already reported (go-embedded-c patch).
+func nonNilFields(fs []*Field) []*Field {
+	r := fs[:0]
+	for _, f := range fs {
+		if f != nil {
+			r = append(r, f)
+		}
+	}
+	return r
+}

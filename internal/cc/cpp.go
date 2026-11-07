@@ -936,8 +936,9 @@ more:
 				args, rparen, ok := c.parseMacroArgs(TS)
 				// trc("args=%s rparen=%#U %q ok=%v", toksDump(args), rparen.Ch, rparen.SrcStr(), ok)
 				if !ok {
-					panic(todo(""))
-					// return r
+					end := cppTokens{rparen}
+					TS.prepend(&end)
+					goto ret
 				}
 
 				if len(args) > m.MinArgs && m.VarArg < 0 {
@@ -1444,6 +1445,10 @@ func (c *cpp) apSelect(m *Macro, t cppToken, AP []cppTokens, i int) (r cppTokens
 		return nil
 	}
 
+	if i >= len(AP) {
+		return nil
+	}
+
 	return c.varArgs(t, AP[i:])
 }
 
@@ -1498,7 +1503,8 @@ out:
 		case '\n':
 			continue
 		case eof:
-			panic(todo("", &t))
+			c.eh("%v: unterminated argument list invoking a macro", t.Position())
+			return nil, t, false
 		default:
 			arg = append(arg, t)
 		}
@@ -2915,6 +2921,11 @@ func (c *cpp) undef(ln controlLine) {
 
 // define executes a #define control-line, [0]6.10.
 func (c *cpp) define(ln controlLine) {
+	if len(ln) < 2 {
+		c.eh("%v: missing macro name", ln[0].Position())
+		return
+	}
+
 	def := ln[1]
 	ln = ln[2:] // Remove '#' and "define"
 	if len(ln) == 0 {
@@ -2923,7 +2934,17 @@ func (c *cpp) define(ln controlLine) {
 	}
 
 	nm := ln[0]
+	if nm.Ch != rune(IDENTIFIER) {
+		c.eh("%v: macro name must be an identifier", nm.Position())
+		return
+	}
+
 	ln = ln[1:]
+	if len(ln) == 0 {
+		c.defineObjectMacro(nm, nil)
+		return
+	}
+
 	switch {
 	case ln[0].Ch == '(' && len(ln[0].Sep()) == 0:
 		// lparen: a ( character not immediately preceded by white-space
@@ -3026,6 +3047,11 @@ func (c *cpp) newMacro(nm Token, params []Token, replList []cppToken, minArgs, v
 		if nm.Position().Filename != "<predefined>" {
 			return
 		}
+	}
+
+	if n := len(replList); n != 0 && (replList[0].Ch == rune(PPPASTE) || replList[n-1].Ch == rune(PPPASTE)) {
+		c.eh("%v: '##' cannot appear at either end of a macro expansion", nm.Position())
+		return
 	}
 
 	m, err := newMacro(nm, params, replList, minArgs, varArg, isFnLike)

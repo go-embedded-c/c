@@ -939,7 +939,7 @@ func parse(cfg *Config, sources []Source) (*parser, *AST, error) {
 		return nil, nil, err
 	}
 
-	ast, err := p.parse()
+	ast, err := p.parseBounded()
 	return p, ast, err
 }
 

@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("#define M(A,...) __VA_ARGS__\nM()")
