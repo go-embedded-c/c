@@ -3239,6 +3239,9 @@ func (n *EnumSpecifier) check(c *ctx) (r Type) {
 		}
 		for _, v := range list {
 			v.typ = t
+			if ts == nil && min >= math.MinInt32 && max <= math.MaxInt32 {
+				v.typ = c.intT
+			}
 		}
 		et := c.newEnumType(n.LexicalScope(), tag, t, list)
 		et.min = min
@@ -4817,7 +4820,7 @@ func (n *UnaryExpression) check(c *ctx, mode flags) (r Type) {
 		n.typ = c.pvoidT
 	case UnaryExpressionAlignofExpr: // "_Alignof" UnaryExpression
 		n.setPure(true)
-		t := n.UnaryExpression.check(c, mode.add(decay))
+		t := n.UnaryExpression.check(c, mode).Undecay()
 		n.val, n.typ = UInt64Value(t.Align()), c.sizeT(n)
 	case UnaryExpressionAlignofType: // "_Alignof" '(' TypeName ')'
 		n.setPure(true)

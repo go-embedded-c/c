@@ -13,6 +13,7 @@ package wasmgen
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 
 	"github.com/go-embedded-c/c/internal/cc"
 	"github.com/go-embedded-c/c/internal/wasm"
@@ -130,13 +131,27 @@ func Compile(ast *cc.AST, file string) ([]byte, error) {
 	return CompileLimits(ast, file, Limits{})
 }
 
+// InternalError is a panic inside the generator or in a cc/v4 helper it
+// called, recovered: the AST may come from untrusted text, and a defect
+// must not take the process down. Unlike *Unsupported, it is a bug.
+type InternalError struct {
+	Value any
+}
+
+func (e *InternalError) Error() string { return fmt.Sprintf("wasmgen: internal error: %v", e.Value) }
+
 // CompileLimits is Compile with explicit limits.
-func CompileLimits(ast *cc.AST, file string, lim Limits) ([]byte, error) {
+func CompileLimits(ast *cc.AST, file string, lim Limits) (obj []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			obj, err = nil, &InternalError{Value: r}
+		}
+	}()
 	m := &module{o: &wasm.Object{}, lim: lim.withDefaults(), types: map[string]uint32{}, funcs: map[string]*funcSym{}, data: map[string]*dataSym{}}
 	var defs []*cc.FunctionDefinition
 	for l := ast.TranslationUnit; l != nil; l = l.TranslationUnit {
 		ed := l.ExternalDeclaration
-		if ed.Position().Filename != file {
+		if !fromUnit(ed.Position().Filename, file) {
 			continue
 		}
 		switch ed.Case {
@@ -160,6 +175,17 @@ func CompileLimits(ast *cc.AST, file string, lim Limits) ([]byte, error) {
 	}
 	m.finish()
 	return m.o.Encode(), nil
+}
+
+// fromUnit reports whether a declaration at a position in name belongs to
+// the unit being compiled: the predefined and builtin sources and the
+// headers only declare. The name is not always file: a #line directive
+// renames the rest of the source (gcc torture 20010206-1.c).
+func fromUnit(name, file string) bool {
+	if name == file {
+		return true
+	}
+	return !strings.HasPrefix(name, "<") && !strings.HasSuffix(name, ".h")
 }
 
 // params returns the parameters of ft; cc/v4 gives `(void)` one parameter
@@ -302,7 +328,9 @@ func (m *module) object(d *cc.Declarator, id *cc.InitDeclarator) error {
 		}
 		return nil
 	}
-	seg := wasm.Segment{Name: ".bss." + name, Align: alignLog2(s.bits / 8), Init: make([]byte, s.bits/8)}
+	// The alignment includes an aligned attribute or _Alignas on d.
+	align := max(s.bits/8, d.Type().Align(), d.Alignas())
+	seg := wasm.Segment{Name: ".bss." + name, Align: alignLog2(align), Init: make([]byte, s.bits/8)}
 	if init != nil {
 		seg.Name, seg.Init = ".data."+name, init
 	}

@@ -27,7 +27,10 @@ var patches = []filePatch{
 			"\t// MaxExpansion, when positive, bounds the tokens macro replacement may\n" +
 			"\t// produce in one translation unit. Past it the translation unit is in\n" +
 			"\t// error and every further replacement is empty (go-embedded-c patch).\n" +
-			"\tMaxExpansion int\n",
+			"\tMaxExpansion int\n\n" +
+			"\t// FunctionAlign, when positive, is __alignof__ of a function without an\n" +
+			"\t// aligned attribute, the target's; cc/v4 says 1 (go-embedded-c patch).\n" +
+			"\tFunctionAlign int\n",
 	},
 	{
 		File: "cpp.go",
@@ -170,6 +173,24 @@ var patches = []filePatch{
 		Why:  "`0\\n\\\\`: a token's offset past the end of the last file panicked in the position lookup (go-embedded-c/c#2)",
 		Old:  "\tit = f.items[l-1]\n\treturn it.file.Position(mtoken.Pos(pos - it.off))\n",
 		New:  "\tit = f.items[l-1]\n\tp := mtoken.Pos(pos - it.off)\n\tif end := it.file.Pos(it.file.Size()); p > end {\n\t\tp = end\n\t}\n\treturn it.file.Position(p)\n",
+	},
+	{
+		File: "check.go",
+		Why:  "enumeration constants have type int (C11 6.7.2.2p3) when every value fits; UnsignedEnums gave them the unsigned type of the enum, so `i >= FOO` compared unsigned (gcc torture enum-2.c)",
+		Old:  "\t\tfor _, v := range list {\n\t\t\tv.typ = t\n\t\t}\n",
+		New:  "\t\tfor _, v := range list {\n\t\t\tv.typ = t\n\t\t\tif ts == nil && min >= math.MinInt32 && max <= math.MaxInt32 {\n\t\t\t\tv.typ = c.intT\n\t\t\t}\n\t\t}\n",
+	},
+	{
+		File: "check.go",
+		Why:  "GNU __alignof__ of an expression does not decay it, as sizeof does not: a function aligned(256) has alignment 256, not a pointer's (gcc torture align-3.c)",
+		Old:  "\t\tt := n.UnaryExpression.check(c, mode.add(decay))\n\t\tn.val, n.typ = UInt64Value(t.Align()), c.sizeT(n)\n",
+		New:  "\t\tt := n.UnaryExpression.check(c, mode).Undecay()\n\t\tn.val, n.typ = UInt64Value(t.Align()), c.sizeT(n)\n",
+	},
+	{
+		File: "type.go",
+		Why:  "and FunctionType.Align returns it",
+		Old:  "\t\t\treturn int(v)\n\t\t}\n\t}\n\n\treturn 1\n}\n\n// Decay implements Type.\nfunc (n *FunctionType) Decay()",
+		New:  "\t\t\treturn int(v)\n\t\t}\n\t}\n\n\tif n.c != nil && n.c.cfg.FunctionAlign > 0 {\n\t\treturn n.c.cfg.FunctionAlign\n\t}\n\n\treturn 1\n}\n\n// Decay implements Type.\nfunc (n *FunctionType) Decay()",
 	},
 	{
 		File: "scanner.go",

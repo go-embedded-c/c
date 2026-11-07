@@ -42,6 +42,7 @@ func isVoid(t cc.Type) bool { return t != nil && t.Kind() == cc.Void }
 const (
 	opUnreachable = 0x00
 	opDrop        = 0x1a
+	opSelect      = 0x1b
 	opReturn      = 0x0f
 	opCall        = 0x10
 	opLocalGet    = 0x20

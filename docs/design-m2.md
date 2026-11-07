@@ -45,7 +45,9 @@ It compares their exit status and output bytes. This isolates our code generator
 3. **Emission** of wasm instructions, with relocations for function indices, globals, data addresses and table slots.
 4. **Encoding** of the module and its `linking` and `reloc.CODE`/`reloc.DATA` sections.
 
-The dominator tree is computed by Lengauer–Tarjan, the algorithm GHC uses (Ramsey §7.5).
+The dominator tree is computed by the iterative algorithm of Cooper, Harvey and Kennedy ("A Simple, Fast Dominance Algorithm", 2001), over the reverse postorder. GHC uses Lengauer–Tarjan (Ramsey §7.5). Both give the same tree; the iterative one is a dozen lines, and functions are small. This changed from the first version of this design when W3 was implemented.
+
+`&&`, `||` and `?:` do not become graph nodes. A value the enclosing expression has already pushed, like `x` in `x + (a && b)`, cannot cross a block boundary, but it stays intact under a wasm `if` with a result type. These operators are therefore compiled as such `if`s, inside the expression.
 
 ### Irreducible control flow is bounded
 

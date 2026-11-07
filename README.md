@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1 and W2 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals and calls. 10 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals and calls, and control flow structured after Ramsey (2022). 454 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -121,6 +121,12 @@ patch must match exactly once, so a new cc/v4 release cannot skip one, and
   - `^` alone, which looped forever.
 
   A parser that keeps shifting the end of input is stopped after 4096 shifts.
+- Three places where cc/v4 disagreed with clang on a gcc torture file:
+  - enumeration constants have type `int` (C11 6.7.2.2p3), even when
+    `UnsignedEnums` makes the enum type unsigned (`enum-2.c`);
+  - GNU `__alignof__` of an expression does not decay it (`align-3.c`);
+  - `Config.FunctionAlign` sets the alignment of a function without an
+    `aligned` attribute; clang gives 4 on wasm32.
 
 Upgrading cc/v4 means bumping `vendorcc.Version` and rerunning it.
 
@@ -186,7 +192,16 @@ W2 compiles the following:
 - assignment, compound assignment, `++`/`--` and the comma operator;
 - direct calls, to functions defined in the unit or imported. A K&R call of
   an undeclared `exit` or `abort` gets the library's signature, as under
-  clang.
+  clang. `abs`, `labs` and `llabs` are computed inline, as clang does.
+
+W3 adds control flow:
+
+- `if`/`else`, `while`, `do`, `for`, `break`, `continue`, `return`, and
+  `switch` with fall-through and `default`. These are lowered to a graph of
+  basic blocks, then structured into wasm `block`, `loop`, `if` and `br` by
+  Ramsey's dominator-tree translation ("Beyond Relooper", ICFP 2022).
+- `&&`, `||` and `?:` become wasm `if`s with a result inside the
+  expression.
 
 The generator refuses anything else with an `*Unsupported` error that names
 the construct.
@@ -198,9 +213,9 @@ Three tests check the generator:
   checked locally. A deliberately miscompiled sign extension makes it
   fail.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-07, 10 files ran the same as under clang and none differed. The
-  test holds that count as a floor, and logs the refusals by cause:
-  control flow (W3) first, then pointers (W4).
+  2026-11-07, after W3, 454 files ran the same as under clang (10 after
+  W2) and none differed. The test holds that count as a floor and logs the
+  refusals by cause; pointers (W4) and variadic functions are now first.
 - `FuzzCompile` checks that the generator never panics and that every
   object it emits is a valid module.
 

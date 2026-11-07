@@ -40,11 +40,11 @@ func (g *fgen) constant(v int64, s scalar) {
 	v = convertConst(v, s)
 	if s.vt == wasm.I64 {
 		g.op(opI64Const)
-		g.body = wasm.AppendSLEB(g.body, v)
+		g.sleb(v)
 		return
 	}
 	g.op(opI32Const)
-	g.body = wasm.AppendSLEB(g.body, int64(int32(uint32(v))))
+	g.sleb(int64(int32(uint32(v))))
 }
 
 // normalize re-establishes the representation of s, narrower than its
@@ -149,17 +149,55 @@ func (g *fgen) rvalue(e cc.ExpressionNode) (scalar, error) {
 		if x.Case == cc.ConditionalExpressionLOr {
 			return g.rvalue(x.LogicalOrExpression)
 		}
-		return s, unsupported(x, "?: (W3)")
+		if x.ExpressionList == nil {
+			return s, unsupported(x, "?: without a middle operand")
+		}
+		// E1 ? E2 : E3 (C11 6.5.15): an if with a result, so that values
+		// already pushed by the enclosing expression stay below it.
+		if err := g.condition(x.LogicalOrExpression); err != nil {
+			return s, err
+		}
+		g.op(opIf, byte(s.vt))
+		for i, e := range []cc.ExpressionNode{x.ExpressionList, x.ConditionalExpression} {
+			if i == 1 {
+				g.op(opElse)
+			}
+			from, err := g.rvalue(e)
+			if err != nil {
+				return s, err
+			}
+			g.convert(from, s)
+		}
+		g.op(opEnd)
+		return s, nil
 	case *cc.LogicalOrExpression:
 		if x.Case == cc.LogicalOrExpressionLAnd {
 			return g.rvalue(x.LogicalAndExpression)
 		}
-		return s, unsupported(x, "|| (W3)")
+		// E1 || E2 (C11 6.5.14): 1 if E1 is non-zero, else E2 != 0.
+		if err := g.condition(x.LogicalOrExpression); err != nil {
+			return s, err
+		}
+		g.op(opIf, byte(wasm.I32), opI32Const, 1, opElse)
+		if err := g.condition(x.LogicalAndExpression); err != nil {
+			return s, err
+		}
+		g.op(opI32Eqz, opI32Eqz, opEnd)
+		return s, nil
 	case *cc.LogicalAndExpression:
 		if x.Case == cc.LogicalAndExpressionOr {
 			return g.rvalue(x.InclusiveOrExpression)
 		}
-		return s, unsupported(x, "&& (W3)")
+		// E1 && E2 (C11 6.5.13): E2 != 0 if E1 is non-zero, else 0.
+		if err := g.condition(x.LogicalAndExpression); err != nil {
+			return s, err
+		}
+		g.op(opIf, byte(wasm.I32))
+		if err := g.condition(x.InclusiveOrExpression); err != nil {
+			return s, err
+		}
+		g.op(opI32Eqz, opI32Eqz, opElse, opI32Const, 0, opEnd)
+		return s, nil
 	case *cc.InclusiveOrExpression:
 		return s, g.binary(x.InclusiveOrExpression, x.ExclusiveOrExpression, s, opI32Or)
 	case *cc.ExclusiveOrExpression:
@@ -277,6 +315,12 @@ func (g *fgen) binary(a, b cc.ExpressionNode, s scalar, op byte) error {
 
 // compare pushes the int result of comparing a and b in their common type.
 func (g *fgen) compare(a, b cc.ExpressionNode, signed, unsigned byte) error {
+	if _, ok := scalarOf(a.Type()); !ok {
+		return unsupported(a, "comparison of "+typeName(a.Type()))
+	}
+	if _, ok := scalarOf(b.Type()); !ok {
+		return unsupported(b, "comparison of "+typeName(b.Type()))
+	}
 	common, ok := scalarOf(cc.UsualArithmeticConversions(a.Type(), b.Type()))
 	if !ok {
 		return unsupported(a, "comparison of "+typeName(a.Type())+" and "+typeName(b.Type()))
@@ -389,6 +433,45 @@ func (g *fgen) effect(e cc.ExpressionNode) error {
 		if x.Case == cc.PrimaryExpressionExpr {
 			return g.effect(x.ExpressionList)
 		}
+	case *cc.LogicalAndExpression, *cc.LogicalOrExpression:
+		// `a && f();`: evaluate the right operand only for its effect.
+		var a, b cc.ExpressionNode
+		negate := false
+		if and, ok := x.(*cc.LogicalAndExpression); ok && and.Case == cc.LogicalAndExpressionLAnd {
+			a, b = and.LogicalAndExpression, and.InclusiveOrExpression
+		} else if or, ok := x.(*cc.LogicalOrExpression); ok && or.Case == cc.LogicalOrExpressionLOr {
+			a, b, negate = or.LogicalOrExpression, or.LogicalAndExpression, true
+		}
+		if a != nil {
+			if err := g.condition(a); err != nil {
+				return err
+			}
+			if negate {
+				g.op(opI32Eqz)
+			}
+			g.op(opIf, voidBT)
+			if err := g.effect(b); err != nil {
+				return err
+			}
+			g.op(opEnd)
+			return nil
+		}
+	case *cc.ConditionalExpression:
+		if x.Case == cc.ConditionalExpressionCond && x.ExpressionList != nil {
+			if err := g.condition(x.LogicalOrExpression); err != nil {
+				return err
+			}
+			g.op(opIf, voidBT)
+			if err := g.effect(x.ExpressionList); err != nil {
+				return err
+			}
+			g.op(opElse)
+			if err := g.effect(x.ConditionalExpression); err != nil {
+				return err
+			}
+			g.op(opEnd)
+			return nil
+		}
 	}
 	if e.Pure() {
 		return nil
@@ -458,8 +541,7 @@ func (g *fgen) lvalue(e cc.ExpressionNode) (target, error) {
 func (g *fgen) memarg(t target, op byte, align uint32) {
 	g.op(op)
 	g.uleb(uint64(align))
-	g.relocs = append(g.relocs, wasm.Reloc{Type: wasm.RelocMemoryAddrLEB, Offset: uint32(len(g.body)), Symbol: t.global.sym})
-	g.body = wasm.AppendPaddedULEB(g.body, 0)
+	g.reloc(wasm.RelocMemoryAddrLEB, t.global.sym)
 }
 
 func (g *fgen) load(x *cc.PrimaryExpression) error {
@@ -541,6 +623,9 @@ func (g *fgen) assign(x *cc.AssignmentExpression, want bool) error {
 	}
 	// E1 op= E2 is E1 = E1 op E2 with E1 evaluated once; the operation is
 	// in the promoted type of E1 for shifts, in the common type otherwise.
+	if _, ok := scalarOf(x.AssignmentExpression.Type()); !ok {
+		return unsupported(x, "compound assignment of "+typeName(x.AssignmentExpression.Type()))
+	}
 	var opT cc.Type
 	if x.Case == cc.AssignmentExpressionLsh || x.Case == cc.AssignmentExpressionRsh {
 		opT = cc.IntegerPromotion(x.UnaryExpression.Type())
@@ -651,6 +736,9 @@ func (g *fgen) call(x *cc.PostfixExpression) error {
 	for l := x.ArgumentExpressionList; l != nil; l = l.ArgumentExpressionList {
 		args = append(args, l.AssignmentExpression)
 	}
+	if s, ok := absBuiltins[strings.TrimPrefix(d.Name(), "__builtin_")]; ok && len(args) == 1 {
+		return g.abs(args[0], s)
+	}
 	f, err := g.calleeFor(x, d)
 	if err != nil {
 		return err
@@ -666,9 +754,8 @@ func (g *fgen) call(x *cc.PostfixExpression) error {
 		g.convert(from, f.params[i])
 	}
 	g.op(opCall)
-	g.m.calls = append(g.m.calls, callSite{fn: g.fn, offset: uint32(len(g.body)), callee: f})
-	g.relocs = append(g.relocs, wasm.Reloc{Type: wasm.RelocFunctionIndexLEB, Offset: uint32(len(g.body)), Symbol: f.sym})
-	g.body = wasm.AppendPaddedULEB(g.body, 0)
+	g.cur.calls = append(g.cur.calls, callSite{offset: uint32(len(g.cur.code)), callee: f})
+	g.reloc(wasm.RelocFunctionIndexLEB, f.sym)
 	switch want := x.Type(); {
 	case f.result == nil && !isVoid(want):
 		// An implicit `int abort()` used for its value: the library
@@ -703,6 +790,41 @@ var libc = map[string][]scalar{
 }
 
 var intScalar = scalar{vt: wasm.I32, bits: 32, signed: true}
+
+// absBuiltins are the library functions clang computes itself, even when
+// the unit defines a function of the same name (gcc torture 20021127-1.c:
+// a user llabs that aborts is never called).
+var absBuiltins = map[string]scalar{
+	"abs":   intScalar,
+	"labs":  intScalar, // long is 32 bits on wasm32
+	"llabs": {vt: wasm.I64, bits: 64, signed: true},
+}
+
+// abs pushes |a| in s: select(-t, t, t < 0).
+func (g *fgen) abs(a cc.ExpressionNode, s scalar) error {
+	from, err := g.rvalue(a)
+	if err != nil {
+		return err
+	}
+	g.convert(from, s)
+	t := g.local(s.vt)
+	g.op(opLocalSet)
+	g.uleb(uint64(t))
+	g.zero(s)
+	g.op(opLocalGet)
+	g.uleb(uint64(t))
+	g.op(opFor(opI32Sub, s), opLocalGet)
+	g.uleb(uint64(t))
+	g.op(opLocalGet)
+	g.uleb(uint64(t))
+	g.zero(s)
+	lt := byte(opI32LtS)
+	if s.vt == wasm.I64 {
+		lt += i64CompareDelta
+	}
+	g.op(lt, opSelect)
+	return nil
+}
 
 // calleeFor returns the function a call goes to: one defined or already
 // imported here, a library function with its library signature, or else an

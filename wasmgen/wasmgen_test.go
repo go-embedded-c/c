@@ -36,9 +36,9 @@ func TestUnsupported(t *testing.T) {
 	}
 	for _, tc := range []struct{ src, what string }{
 		{"int main(int c, char **v) { return 0; }", "parameter of type pointer to pointer to char"},
-		{"int main(void) { int x = 1; if (x) return 1; return 0; }", "control flow (W3): StatementSelection"},
-		{"int main(void) { int x = 1; return x && 2; }", "&& (W3)"},
-		{"int main(void) { int x = 1; return x ? 2 : 3; }", "?: (W3)"},
+		{"int main(void) { goto l; l: return 0; }", "jump JumpStatementGoto (W7)"},
+		{"int main(void) { int x = 1; switch (x) { case 1 ... 3: return 1; } return 0; }", "case range"},
+		{"int main(void) { int x = 1; return x ?: 2; }", "?: without a middle operand"},
 		{"int main(void) { int x = 1; int *p = &x; return 0; }", "address-taken local (W4)"},
 		{"int main(void) { static int n; return n; }", "static local"},
 		{"double d; int main(void) { return 0; }", "file-scope object of type double"},
@@ -197,6 +197,21 @@ func TestAgainstClang(t *testing.T) {
 		"int main(void) { signed char c = 127; c += 1; unsigned char u = 255; u++; return c * 1000 + u; }",
 		"long long f(long long a, int b) { return a / b + a % b; } int main(void) { return f(-1000000000000LL, 7) & 0xffff; }",
 		"int main(void) { int a = -7; unsigned b = 3; return (a / 2) * 100 + (a % 2) * 10 + (a < b) + (a >> 1); }",
+		// W3: control flow
+		"int f(int n) { if (n < 2) return n; return f(n - 1) + f(n - 2); } int main(void) { return f(20); }",
+		"int main(void) { int s = 0, i; for (i = 0; i < 100; i++) { if (i % 3 == 0) continue; if (i > 90) break; s += i; } return s; }",
+		"int main(void) { int n = 27, k = 0; while (n != 1) { n = n & 1 ? 3 * n + 1 : n / 2; k++; } return k; }",
+		"int main(void) { int i = 0, s = 0; do { s = s * 3 + i; } while (++i < 9); return s; }",
+		"int g(int x) { switch (x) { case 0: return 10; case 1: case 2: x += 5; case 3: return x * 2; default: break; case -1: return 99; } return x; }\nint main(void) { return g(0) + g(1) * 3 + g(2) * 5 + g(3) * 7 + g(-1) + g(42); }",
+		"int calls; int t(int v) { calls++; return v; } int main(void) { int a = t(0) && t(1); int b = t(1) || t(0); int c = t(1) && t(2); t(0) || t(3); return a + b * 2 + c * 4 + calls * 8; }",
+		"int main(void) { int i, j, s = 0; for (i = 0; i < 10; i++) for (j = 0; j < 10; j++) { if (j > i) break; s += i * j; } return s; }",
+		"int main(void) { long long x = 0; int i; for (i = 0; i < 64; i++) x += (i & 1) ? -((long long)i << i % 40) : i; return (int)(x ^ x >> 32); }",
+		"void abort(void); int main(void) { unsigned u = 5; if (u - 6 < 0) abort(); if (!(u > 4)) abort(); return 0; }",
+		// the four gcc torture files the first W3 census got wrong
+		"enum foo { FOO, BAR }; int main(void) { int i, n = 0; for (i = BAR; i >= FOO; --i) n++; return n * 10 + (FOO - 1 < 0) + sizeof(FOO); }",
+		"int f(void) { return 26; }\n#line 1 \"renamed.c\"\nint main(void) { return f(); }",
+		"void abort(void); long long a = -7; long long llabs(long long); int main(void) { return (int)llabs(a) + abs(-3) * 10; } long long llabs(long long b) { abort(); }",
+		"void f(void) __attribute__((aligned(256))); void f(void) {} void g(void) {} int x __attribute__((aligned(64))); long long ll;\nint main(void) { return __alignof__(f) + __alignof__(g) * 1000 + __alignof__(x) * 100000 + __alignof__(ll) * 10000000; }",
 	} {
 		h.check(src)
 	}
@@ -287,7 +302,13 @@ func (g *gen) expr(depth int) string {
 	if g.r.IntN(2) == 0 {
 		wide = "unsigned long long"
 	}
-	switch g.r.IntN(14) {
+	switch g.r.IntN(17) {
+	case 14:
+		return "((" + a + ") && (" + b + "))"
+	case 15:
+		return "((" + a + ") || (" + b + "))"
+	case 16:
+		return "((" + a + ") ? (" + b + ") : (" + g.expr(depth-1) + "))"
 	case 0:
 		return "((" + wide + ")(" + a + ") + (" + wide + ")(" + b + "))"
 	case 1:
@@ -326,6 +347,86 @@ func (g *gen) expr(depth int) string {
 	return "(" + a + ", " + b + ")"
 }
 
+// statement writes a random statement. Loops run a bounded number of times
+// on a counter (i0, i1, i2 by nesting level) that nothing else assigns, so
+// every program terminates; break and continue appear only inside loops.
+func (g *gen) statement(b *strings.Builder, ind string, level int, inLoop bool) {
+	r := g.r
+	v := g.vars[r.IntN(len(g.vars))]
+	t := g.typ[v]
+	kind := r.IntN(12)
+	if level >= 3 && kind >= 6 {
+		kind = r.IntN(6)
+	}
+	switch kind {
+	case 0, 1:
+		fmt.Fprintf(b, "%s%s = %s;\n", ind, v, g.expr(3))
+	case 2:
+		ops := []string{"&=", "|=", "^="}
+		fmt.Fprintf(b, "%s%s %s %s;\n", ind, v, ops[r.IntN(len(ops))], g.expr(2))
+	case 3:
+		if t.signed {
+			fmt.Fprintf(b, "%s%s = (%s)((unsigned long long)%s + 1);\n", ind, v, t.name, v)
+		} else {
+			ops := []string{"+=", "-=", "*="}
+			fmt.Fprintf(b, "%s%s %s %s;\n", ind, v, ops[r.IntN(len(ops))], g.expr(2))
+		}
+	case 4:
+		fmt.Fprintf(b, "%s%s = helper(%s, (int)(%s));\n", ind, v, g.expr(2), g.expr(1))
+	case 5:
+		if inLoop && r.IntN(2) == 0 {
+			jumps := []string{"break", "continue"}
+			fmt.Fprintf(b, "%sif (%s) %s;\n", ind, g.expr(2), jumps[r.IntN(2)])
+		} else if t.signed || t.bits == 1 {
+			fmt.Fprintf(b, "%s%s = !%s;\n", ind, v, v)
+		} else {
+			fmt.Fprintf(b, "%s%s++;\n", ind, v)
+		}
+	case 6, 7:
+		fmt.Fprintf(b, "%sif (%s) {\n", ind, g.expr(2))
+		g.block(b, ind+"\t", level+1, inLoop)
+		if r.IntN(2) == 0 {
+			fmt.Fprintf(b, "%s} else {\n", ind)
+			g.block(b, ind+"\t", level+1, inLoop)
+		}
+		fmt.Fprintf(b, "%s}\n", ind)
+	case 8:
+		c := fmt.Sprintf("i%d", level)
+		fmt.Fprintf(b, "%sfor (%s = 0; %s < %d; %s++) {\n", ind, c, c, 1+r.IntN(6), c)
+		g.block(b, ind+"\t", level+1, true)
+		fmt.Fprintf(b, "%s}\n", ind)
+	case 9:
+		c := fmt.Sprintf("i%d", level)
+		fmt.Fprintf(b, "%s%s = 0;\n%swhile (%s < %d) {\n%s\t%s++;\n", ind, c, ind, c, 1+r.IntN(6), ind, c)
+		g.block(b, ind+"\t", level+1, true)
+		fmt.Fprintf(b, "%s}\n", ind)
+	case 10:
+		c := fmt.Sprintf("i%d", level)
+		fmt.Fprintf(b, "%s%s = 0;\n%sdo {\n%s\t%s++;\n", ind, c, ind, ind, c)
+		g.block(b, ind+"\t", level+1, true)
+		fmt.Fprintf(b, "%s} while (%s < %d);\n", ind, c, 1+r.IntN(6))
+	case 11:
+		fmt.Fprintf(b, "%sswitch ((int)(%s) & 7) {\n", ind, g.expr(2))
+		for _, l := range []string{"case 0:", "case 1:", "case 2:", "case 5:", "default:"} {
+			if r.IntN(3) == 0 {
+				continue
+			}
+			fmt.Fprintf(b, "%s%s\n", ind, l)
+			g.block(b, ind+"\t", level+1, inLoop)
+			if r.IntN(2) == 0 {
+				fmt.Fprintf(b, "%s\tbreak;\n", ind)
+			}
+		}
+		fmt.Fprintf(b, "%s}\n", ind)
+	}
+}
+
+func (g *gen) block(b *strings.Builder, ind string, level int, inLoop bool) {
+	for range 1 + g.r.IntN(3) {
+		g.statement(b, ind, level, inLoop)
+	}
+}
+
 func randomProgram(r *rand.Rand) string {
 	g := &gen{r: r, typ: map[string]ctype{}}
 	var b strings.Builder
@@ -344,42 +445,17 @@ func randomProgram(r *rand.Rand) string {
 	pt, rt := g.pickType(), g.pickType()
 	saved := g.vars
 	g.vars = []string{"p", "q"}
-	fmt.Fprintf(&b, "static %s helper(%s p, int q) { return %s; }\n", rt.name, pt.name, g.expr(3))
+	fmt.Fprintf(&b, "static %s helper(%s p, int q) {\n\tif (%s) return %s;\n\treturn %s;\n}\n", rt.name, pt.name, g.expr(2), g.expr(3), g.expr(3))
 	g.vars = saved
-	b.WriteString("int main(void) {\n")
+	b.WriteString("int main(void) {\n\tint i0, i1, i2;\n")
 	for i := range 5 {
 		t := g.pickType()
 		name := fmt.Sprintf("v%d", i)
 		fmt.Fprintf(&b, "\t%s %s = (%s)(%s);\n", t.name, name, t.name, g.expr(2))
 		g.vars, g.typ[name] = append(g.vars, name), t
 	}
-	for range 12 {
-		v := g.vars[r.IntN(len(g.vars))]
-		t := g.typ[v]
-		switch r.IntN(6) {
-		case 0, 1:
-			fmt.Fprintf(&b, "\t%s = %s;\n", v, g.expr(3))
-		case 2:
-			ops := []string{"&=", "|=", "^="}
-			fmt.Fprintf(&b, "\t%s %s %s;\n", v, ops[r.IntN(len(ops))], g.expr(2))
-		case 3:
-			if t.signed {
-				fmt.Fprintf(&b, "\t%s = (%s)((unsigned long long)%s + 1);\n", v, t.name, v)
-			} else {
-				ops := []string{"+=", "-=", "*="}
-				fmt.Fprintf(&b, "\t%s %s %s;\n", v, ops[r.IntN(len(ops))], g.expr(2))
-			}
-		case 4:
-			fmt.Fprintf(&b, "\t%s = helper(%s, (int)(%s));\n", v, g.expr(2), g.expr(1))
-		case 5:
-			if t.signed || t.bits == 1 {
-				fmt.Fprintf(&b, "\t%s = !%s;\n", v, v)
-			} else if r.IntN(2) == 0 {
-				fmt.Fprintf(&b, "\t%s++;\n", v)
-			} else {
-				fmt.Fprintf(&b, "\t--%s;\n", v)
-			}
-		}
+	for range 10 {
+		g.statement(&b, "\t", 0, false)
 	}
 	b.WriteString("\tunsigned h = 0;\n")
 	for _, v := range g.vars {

@@ -141,6 +141,7 @@ func config(lim Limits) (*cc.Config, error) {
 		SysIncludePaths: headers.SysIncludePaths,
 		UnsignedEnums:   true,
 		MaxExpansion:    lim.MaxTokens,
+		FunctionAlign:   cparse.FunctionAlign,
 	}, nil
 }
 

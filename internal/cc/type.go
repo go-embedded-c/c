@@ -756,6 +756,10 @@ func (n *FunctionType) Align() int {
 		}
 	}
 
+	if n.c != nil && n.c.cfg.FunctionAlign > 0 {
+		return n.c.cfg.FunctionAlign
+	}
+
 	return 1
 }
 
