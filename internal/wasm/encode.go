@@ -4,13 +4,16 @@ package wasm
 const (
 	secCustom   = 0
 	secType     = 1
+	secImport   = 2
 	secFunction = 3
 	secCode     = 10
+	secData     = 11
 )
 
-// Linking.md: the linking section's version and the symbol table subsection.
+// Linking.md: the linking section's version and its subsections.
 const (
 	linkingVersion = 2
+	subSegmentInfo = 5
 	subSymbolTable = 8
 )
 
@@ -57,6 +60,9 @@ func AppendPaddedSLEB(b []byte, v int32) []byte {
 	return append(b, byte(v&0x7f))
 }
 
+// PutPaddedULEB overwrites the 5-byte LEB at b[0:5] with v.
+func PutPaddedULEB(b []byte, v uint32) { AppendPaddedULEB(b[:0], v) }
+
 func appendName(b []byte, s string) []byte {
 	b = AppendULEB(b, uint64(len(s)))
 	return append(b, s...)
@@ -72,9 +78,19 @@ func appendCustom(b []byte, name string, content []byte) []byte {
 	return appendSection(b, secCustom, append(appendName(nil, name), content...))
 }
 
-// Encode returns the object as a module: magic, version, the type, function
-// and code sections, then "linking" and, when there are relocations,
-// "reloc.CODE".
+// MemoryPages is the minimum of the imported memory for the segments:
+// enough 64 KiB pages to hold them.
+func (o *Object) memoryPages() uint64 {
+	var end uint64
+	for _, s := range o.Segments {
+		end = max(end, uint64(s.Offset)+uint64(len(s.Init)))
+	}
+	return (end + 0xffff) >> 16
+}
+
+// Encode returns the object as a module: magic, version, the type, import,
+// function, code and data sections, then "linking" and the "reloc.CODE"
+// section when there are relocations.
 func (o *Object) Encode() []byte {
 	b := []byte{0x00, 'a', 's', 'm', 0x01, 0x00, 0x00, 0x00}
 	section := 0 // index of the next section, as reloc.* counts them
@@ -94,6 +110,30 @@ func (o *Object) Encode() []byte {
 	}
 	b = appendSection(b, secType, types)
 	section++
+
+	memory := o.Memory || len(o.Segments) != 0
+	if memory || len(o.Imports) != 0 {
+		var imp []byte
+		n := len(o.Imports)
+		if memory {
+			n++
+		}
+		imp = AppendULEB(imp, uint64(n))
+		if memory {
+			imp = appendName(imp, "env")
+			imp = appendName(imp, "__linear_memory")
+			imp = append(imp, 0x02, 0x00) // memory, limits without a maximum
+			imp = AppendULEB(imp, o.memoryPages())
+		}
+		for _, i := range o.Imports {
+			imp = appendName(imp, "env")
+			imp = appendName(imp, i.Name)
+			imp = append(imp, 0x00) // function
+			imp = AppendULEB(imp, uint64(i.Type))
+		}
+		b = appendSection(b, secImport, imp)
+		section++
+	}
 
 	var funcs []byte
 	funcs = AppendULEB(funcs, uint64(len(o.Funcs)))
@@ -122,6 +162,21 @@ func (o *Object) Encode() []byte {
 	}
 	codeSection := section
 	b = appendSection(b, secCode, code)
+	section++
+
+	if len(o.Segments) != 0 {
+		var data []byte
+		data = AppendULEB(data, uint64(len(o.Segments)))
+		for _, s := range o.Segments {
+			data = append(data, 0x00, 0x41) // active in memory 0, i32.const
+			data = AppendSLEB(data, int64(s.Offset))
+			data = append(data, 0x0b) // end
+			data = AppendULEB(data, uint64(len(s.Init)))
+			data = append(data, s.Init...)
+		}
+		b = appendSection(b, secData, data)
+		section++
+	}
 
 	var linking []byte
 	linking = AppendULEB(linking, linkingVersion)
@@ -130,12 +185,37 @@ func (o *Object) Encode() []byte {
 	for _, s := range o.Symbols {
 		syms = append(syms, byte(s.Kind))
 		syms = AppendULEB(syms, uint64(s.Flags))
-		syms = AppendULEB(syms, uint64(s.Index))
-		syms = appendName(syms, s.Name)
+		undefined := s.Flags&SymUndefined != 0
+		switch s.Kind {
+		case SymData:
+			syms = appendName(syms, s.Name)
+			if !undefined {
+				syms = AppendULEB(syms, uint64(s.Index))
+				syms = AppendULEB(syms, uint64(s.Offset))
+				syms = AppendULEB(syms, uint64(s.Size))
+			}
+		default:
+			syms = AppendULEB(syms, uint64(s.Index))
+			if !undefined || s.Flags&SymExplicitName != 0 {
+				syms = appendName(syms, s.Name)
+			}
+		}
 	}
 	linking = append(linking, subSymbolTable)
 	linking = AppendULEB(linking, uint64(len(syms)))
 	linking = append(linking, syms...)
+	if len(o.Segments) != 0 {
+		var seg []byte
+		seg = AppendULEB(seg, uint64(len(o.Segments)))
+		for _, s := range o.Segments {
+			seg = appendName(seg, s.Name)
+			seg = AppendULEB(seg, uint64(s.Align))
+			seg = AppendULEB(seg, 0) // flags
+		}
+		linking = append(linking, subSegmentInfo)
+		linking = AppendULEB(linking, uint64(len(seg)))
+		linking = append(linking, seg...)
+	}
 	b = appendCustom(b, "linking", linking)
 
 	if len(relocs) != 0 {

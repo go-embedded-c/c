@@ -56,14 +56,33 @@ const (
 	SymNoStrip      = 0x80
 )
 
-// Symbol is an entry of the symbol table. For a function, Index is in the
-// function index space (imports first); only defined functions are
-// supported here, so Name is always written.
+// Symbol is an entry of the symbol table.
+//
+// For a function, Index is in the function index space (imports first); an
+// undefined function (SymUndefined) refers to an import and its name is the
+// import's. For data, Index is the segment, and Offset and Size place the
+// object in it; an undefined data symbol has only its name.
 type Symbol struct {
-	Kind  SymKind
-	Flags uint32
-	Index uint32
-	Name  string
+	Kind         SymKind
+	Flags        uint32
+	Index        uint32
+	Name         string
+	Offset, Size uint32
+}
+
+// Import is a function import: module "env", field Name, of type Type.
+type Import struct {
+	Name string
+	Type uint32
+}
+
+// Segment is a data segment: Init bytes placed at Offset in memory 0, with
+// a name and alignment (log2) for the segment info subsection.
+type Segment struct {
+	Name   string
+	Align  uint32
+	Offset uint32
+	Init   []byte
 }
 
 // RelocType is a relocation type (Linking.md, relocation sections).
@@ -72,6 +91,7 @@ type RelocType byte
 // The relocation types used so far.
 const (
 	RelocFunctionIndexLEB RelocType = 0
+	RelocMemoryAddrLEB    RelocType = 3
 	RelocMemoryAddrSLEB   RelocType = 4
 	RelocGlobalIndexLEB   RelocType = 7
 )
@@ -95,8 +115,14 @@ type Reloc struct {
 }
 
 // Object is a relocatable object: the sections of one translation unit.
+// Function indices count Imports first, then Funcs. Memory is imported as
+// env.__linear_memory, as clang's objects do, when Memory is set or there
+// are Segments.
 type Object struct {
-	Types   []FuncType
-	Funcs   []Func
-	Symbols []Symbol
+	Types    []FuncType
+	Imports  []Import
+	Memory   bool
+	Funcs    []Func
+	Segments []Segment
+	Symbols  []Symbol
 }
