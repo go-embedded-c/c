@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1 is done: encoder, object writer, `wasm-ld` + wazero harness against clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1 and W2 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals and calls. 10 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -176,10 +176,33 @@ linker of M3 exists, `oracle.Link` links the object with the pinned
 `wasm-ld`, `crt1.o` and `libc.a`. Tests then run the program in the same
 wazero as clang's, and compare exit status and output (`TestAgainstClang`).
 
-W1 compiles `int main(void)` returning a constant. The generator refuses
-anything else with an `*Unsupported` error that names the construct, so a
-corpus run counts refusals by cause. `FuzzCompile` checks two things: the
-generator never panics, and every object it emits is a valid module.
+W2 compiles the following:
+
+- functions with integer parameters and results;
+- integer locals and file-scope objects: initialised, tentative, `static`
+  and `extern`;
+- every integer operator except `&&`, `||` and `?:`, with C's conversions
+  at each width from `_Bool` to `long long`;
+- assignment, compound assignment, `++`/`--` and the comma operator;
+- direct calls, to functions defined in the unit or imported. A K&R call of
+  an undeclared `exit` or `abort` gets the library's signature, as under
+  clang.
+
+The generator refuses anything else with an `*Unsupported` error that names
+the construct.
+
+Three tests check the generator:
+
+- `TestRandomExpressions` generates random programs without undefined
+  behaviour. Each must exit exactly as clang's does: 60 programs in CI, 600
+  checked locally. A deliberately miscompiled sign extension makes it
+  fail.
+- `TestCorpusGCCTorture` counts what happens to each torture file. On
+  2026-11-07, 10 files ran the same as under clang and none differed. The
+  test holds that count as a floor, and logs the refusals by cause:
+  control flow (W3) first, then pointers (W4).
+- `FuzzCompile` checks that the generator never panics and that every
+  object it emits is a valid module.
 
 ## Not yet
 
