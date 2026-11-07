@@ -147,15 +147,37 @@ func (t *Toolchain) Args(o CompileOptions, out string) []string {
 	if o.Std == "" {
 		o.Std = "gnu89"
 	}
-	args := []string{
-		"--target=" + Target, "--sysroot=" + t.Sysroot,
-		o.Opt, "-std=" + o.Std, "-w",
+	args := append(t.targetArgs(), o.Opt, "-std="+o.Std, "-w")
+	args = append(args, t.linkArgs()...)
+	args = append(args, o.Extra...)
+	return append(args, "-x", "c", "-", "-o", out)
+}
+
+func (t *Toolchain) targetArgs() []string {
+	return []string{"--target=" + Target, "--sysroot=" + t.Sysroot}
+}
+
+// linkArgs are the link flags every program gets, clang's or ours.
+func (t *Toolchain) linkArgs() []string {
+	return []string{
 		fmt.Sprintf("-Wl,-z,stack-size=%d", StackSize),
 		// wasi-libc leaves long double formatting out unless asked.
 		"-lc-printscan-long-double",
 	}
-	args = append(args, o.Extra...)
-	return append(args, "-x", "c", "-", "-o", out)
+}
+
+// Link links a relocatable object (wasmgen's output) into a WASI command,
+// with the same crt1.o, libc and flags as Compile's programs. A
+// *CompileError means wasm-ld refused the object.
+func (t *Toolchain) Link(ctx context.Context, obj []byte) ([]byte, error) {
+	return t.drive(ctx, 30*time.Second, func(dir, out string) ([]string, []byte, error) {
+		in := filepath.Join(dir, "a.o")
+		if err := os.WriteFile(in, obj, 0o600); err != nil {
+			return nil, nil, err
+		}
+		args := append(t.targetArgs(), t.linkArgs()...)
+		return append(args, in, "-o", out), nil, nil
+	})
 }
 
 // CompileError is the compiler's refusal of a program (as opposed to a
@@ -170,7 +192,15 @@ func (t *Toolchain) Compile(ctx context.Context, src []byte, o CompileOptions) (
 	if o.Timeout == 0 {
 		o.Timeout = 30 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(ctx, o.Timeout)
+	return t.drive(ctx, o.Timeout, func(_, out string) ([]string, []byte, error) {
+		return t.Args(o, out), src, nil
+	})
+}
+
+// drive runs the clang driver in a fresh directory with the arguments and
+// stdin that setup returns, and reads back the module written to out.
+func (t *Toolchain) drive(ctx context.Context, timeout time.Duration, setup func(dir, out string) ([]string, []byte, error)) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	dir, err := os.MkdirTemp("", "coracle-")
 	if err != nil {
@@ -178,14 +208,18 @@ func (t *Toolchain) Compile(ctx context.Context, src []byte, o CompileOptions) (
 	}
 	defer os.RemoveAll(dir)
 	out := filepath.Join(dir, "a.wasm")
-	cmd := exec.CommandContext(ctx, t.Clang, t.Args(o, out)...)
-	cmd.Stdin = bytes.NewReader(src)
+	args, stdin, err := setup(dir, out)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, t.Clang, args...)
+	cmd.Stdin = bytes.NewReader(stdin)
 	cmd.Env = []string{"LC_ALL=C"}
 	var diag bytes.Buffer
 	cmd.Stderr, cmd.Stdout = &diag, &diag
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("oracle: compile: %w", ctx.Err())
+			return nil, fmt.Errorf("oracle: clang: %w", ctx.Err())
 		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
