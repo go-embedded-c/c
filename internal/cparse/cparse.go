@@ -44,6 +44,11 @@ func GeneratePredefined(ctx context.Context, clang string) ([]byte, error) {
 	return out, nil
 }
 
+// FunctionAlign is __alignof__ of a function without an aligned attribute:
+// clang 23.1.4 for wasm32-wasip1 gives 4 (measured by wasmgen's
+// TestAgainstClang).
+const FunctionAlign = 4
+
 // ABI returns the wasm32 ABI.
 func ABI() (*cc.ABI, error) {
 	abi, err := cc.NewABI("linux", "386")
@@ -82,6 +87,7 @@ func New(resourceInclude, sysroot string) (*Front, error) {
 		IncludePaths:    []string{"@"}, // #include "x.h" from the including file's directory
 		SysIncludePaths: []string{resourceInclude, filepath.Join(sysroot, "include", "wasm32-wasip1"), filepath.Join(sysroot, "include")},
 		UnsignedEnums:   true, // gcc compatibility, what the torture suite expects
+		FunctionAlign:   FunctionAlign,
 	}}, nil
 }
 

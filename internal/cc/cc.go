@@ -818,6 +818,10 @@ type Config struct {
 	// error and every further replacement is empty (go-embedded-c patch).
 	MaxExpansion int
 
+	// FunctionAlign, when positive, is __alignof__ of a function without an
+	// aligned attribute, the target's; cc/v4 says 1 (go-embedded-c patch).
+	FunctionAlign int
+
 	doNotInjectFunc        bool // testing
 	fakeIncludes           bool // testing
 	freeStanding           bool // -ffreestanding, implies -fno-builtin
