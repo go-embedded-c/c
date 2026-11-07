@@ -111,11 +111,14 @@ func (o *Object) Encode() []byte {
 	b = appendSection(b, secType, types)
 	section++
 
-	memory := o.Memory || len(o.Segments) != 0
+	memory := o.Memory || o.StackPointer || len(o.Segments) != 0
 	if memory || len(o.Imports) != 0 {
 		var imp []byte
 		n := len(o.Imports)
 		if memory {
+			n++
+		}
+		if o.StackPointer {
 			n++
 		}
 		imp = AppendULEB(imp, uint64(n))
@@ -124,6 +127,11 @@ func (o *Object) Encode() []byte {
 			imp = appendName(imp, "__linear_memory")
 			imp = append(imp, 0x02, 0x00) // memory, limits without a maximum
 			imp = AppendULEB(imp, o.memoryPages())
+		}
+		if o.StackPointer {
+			imp = appendName(imp, "env")
+			imp = appendName(imp, "__stack_pointer")
+			imp = append(imp, 0x03, byte(I32), 0x01) // global, i32, mutable
 		}
 		for _, i := range o.Imports {
 			imp = appendName(imp, "env")
@@ -164,6 +172,8 @@ func (o *Object) Encode() []byte {
 	b = appendSection(b, secCode, code)
 	section++
 
+	var dataRelocs []Reloc // offsets relative to the data section's contents
+	dataSection := -1
 	if len(o.Segments) != 0 {
 		var data []byte
 		data = AppendULEB(data, uint64(len(o.Segments)))
@@ -172,8 +182,14 @@ func (o *Object) Encode() []byte {
 			data = AppendSLEB(data, int64(s.Offset))
 			data = append(data, 0x0b) // end
 			data = AppendULEB(data, uint64(len(s.Init)))
+			base := uint32(len(data))
 			data = append(data, s.Init...)
+			for _, r := range s.Relocs {
+				r.Offset += base
+				dataRelocs = append(dataRelocs, r)
+			}
 		}
+		dataSection = section
 		b = appendSection(b, secData, data)
 		section++
 	}
@@ -210,7 +226,7 @@ func (o *Object) Encode() []byte {
 		for _, s := range o.Segments {
 			seg = appendName(seg, s.Name)
 			seg = AppendULEB(seg, uint64(s.Align))
-			seg = AppendULEB(seg, 0) // flags
+			seg = AppendULEB(seg, uint64(s.Flags))
 		}
 		linking = append(linking, subSegmentInfo)
 		linking = AppendULEB(linking, uint64(len(seg)))
@@ -219,20 +235,27 @@ func (o *Object) Encode() []byte {
 	b = appendCustom(b, "linking", linking)
 
 	if len(relocs) != 0 {
-		var rel []byte
-		rel = AppendULEB(rel, uint64(codeSection))
-		rel = AppendULEB(rel, uint64(len(relocs)))
-		for _, r := range relocs {
-			rel = append(rel, byte(r.Type))
-			rel = AppendULEB(rel, uint64(r.Offset))
-			rel = AppendULEB(rel, uint64(r.Symbol))
-			if r.Type.hasAddend() {
-				rel = AppendSLEB(rel, int64(r.Addend))
-			}
-		}
-		b = appendCustom(b, "reloc.CODE", rel)
+		b = appendCustom(b, "reloc.CODE", encodeRelocs(codeSection, relocs))
+	}
+	if len(dataRelocs) != 0 {
+		b = appendCustom(b, "reloc.DATA", encodeRelocs(dataSection, dataRelocs))
 	}
 	return b
+}
+
+func encodeRelocs(section int, relocs []Reloc) []byte {
+	var rel []byte
+	rel = AppendULEB(rel, uint64(section))
+	rel = AppendULEB(rel, uint64(len(relocs)))
+	for _, r := range relocs {
+		rel = append(rel, byte(r.Type))
+		rel = AppendULEB(rel, uint64(r.Offset))
+		rel = AppendULEB(rel, uint64(r.Symbol))
+		if r.Type.hasAddend() {
+			rel = AppendSLEB(rel, int64(r.Addend))
+		}
+	}
+	return rel
 }
 
 // appendLocals appends locals as runs of equal types (binary/modules.html#code-section).

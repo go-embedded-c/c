@@ -14,12 +14,24 @@ type scalar struct {
 	bits   int
 	signed bool
 	isBool bool
+	ptr    bool  // a pointer: an unsigned 32-bit address
+	elem   int64 // for a pointer, the size of what it points to (1 for void, as GNU C)
 }
 
-// scalarOf returns the representation of t, or false when W2 does not
-// compile values of that type (pointers come with W4, floats with W5).
+// scalarOf returns the representation of t, or false when the generator
+// does not compile values of that type yet (floats come with W5).
 func scalarOf(t cc.Type) (scalar, bool) {
-	if t == nil || !cc.IsIntegerType(t) {
+	if t == nil {
+		return scalar{}, false
+	}
+	if p, ok := t.(*cc.PointerType); ok {
+		elem := p.Elem().Size()
+		if elem <= 0 || isVoid(p.Elem()) {
+			elem = 1
+		}
+		return scalar{vt: wasm.I32, bits: 32, ptr: true, elem: elem}, true
+	}
+	if !cc.IsIntegerType(t) {
 		return scalar{}, false
 	}
 	bits := int(t.Size()) * 8
@@ -48,6 +60,8 @@ const (
 	opLocalGet    = 0x20
 	opLocalSet    = 0x21
 	opLocalTee    = 0x22
+	opGlobalGet   = 0x23
+	opGlobalSet   = 0x24
 	opI32Const    = 0x41
 	opI64Const    = 0x42
 

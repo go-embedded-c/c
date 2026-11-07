@@ -11,7 +11,6 @@
 package wasmgen
 
 import (
-	"encoding/binary"
 	"fmt"
 	"strings"
 
@@ -59,6 +58,9 @@ type module struct {
 	funcs map[string]*funcSym
 	// Data symbols by name (file scope objects).
 	data map[string]*dataSym
+	// String literal symbols by contents.
+	strings map[string]uint32
+	sp      uint32 // the __stack_pointer symbol, when imported
 
 	calls []callSite
 }
@@ -113,7 +115,6 @@ type dataSym struct {
 	sym     uint32
 	defined bool
 	seg     int // segment index when defined
-	s       scalar
 }
 
 // callSite is a call immediate to patch once the function indices are
@@ -147,7 +148,7 @@ func CompileLimits(ast *cc.AST, file string, lim Limits) (obj []byte, err error)
 			obj, err = nil, &InternalError{Value: r}
 		}
 	}()
-	m := &module{o: &wasm.Object{}, lim: lim.withDefaults(), types: map[string]uint32{}, funcs: map[string]*funcSym{}, data: map[string]*dataSym{}}
+	m := &module{o: &wasm.Object{}, lim: lim.withDefaults(), types: map[string]uint32{}, funcs: map[string]*funcSym{}, data: map[string]*dataSym{}, strings: map[string]uint32{}}
 	var defs []*cc.FunctionDefinition
 	for l := ast.TranslationUnit; l != nil; l = l.TranslationUnit {
 		ed := l.ExternalDeclaration
@@ -300,40 +301,59 @@ func (m *module) declaration(decl *cc.Declaration) error {
 	return nil
 }
 
-// object defines a file-scope integer object in its own segment, named as
-// clang names them (.data.x, .bss.x).
+// maxObject bounds a static object's size: the object is built in memory
+// here, and the text may be an untrusted cell.
+const maxObject = 16 << 20
+
+// object defines a file-scope object in its own segment, named as clang
+// names them (.data.x, .bss.x).
 func (m *module) object(d *cc.Declarator, id *cc.InitDeclarator) error {
-	s, ok := scalarOf(d.Type())
-	if !ok {
-		return unsupported(d, "file-scope object of type "+d.Type().String())
+	t := d.Type()
+	size, err := objectSize(d, id)
+	if err != nil {
+		return err
 	}
-	var init []byte
-	if id.Case == cc.InitDeclaratorInit {
-		if id.Initializer.AssignmentExpression == nil {
-			return unsupported(id.Initializer, "braced initializer")
-		}
-		v, ok := intValue(id.Initializer.AssignmentExpression)
-		if !ok {
-			return unsupported(id.Initializer, "non-constant initializer")
-		}
-		init = binary.LittleEndian.AppendUint64(nil, uint64(convertConst(v, s)))[:s.bits/8]
+	if size > maxObject {
+		return unsupported(d, "file-scope object larger than the limit")
+	}
+	if !storable(t) {
+		return unsupported(d, "file-scope object of type "+typeName(t))
 	}
 	name := d.Name()
-	if prev := m.data[name]; prev != nil {
-		if !prev.defined {
-			return unsupported(d, "object declared extern then defined")
+	prev := m.data[name]
+	if prev != nil && prev.defined {
+		if id.Case == cc.InitDeclaratorInit {
+			seg := &m.o.Segments[prev.seg]
+			clear(seg.Init)
+			seg.Relocs, seg.Name = nil, ".data."+name
+			return m.staticInit(id.Initializer, seg)
 		}
-		if init != nil {
-			copy(m.o.Segments[prev.seg].Init, init)
-		}
-		return nil
+		return nil // another tentative definition
 	}
 	// The alignment includes an aligned attribute or _Alignas on d.
-	align := max(s.bits/8, d.Type().Align(), d.Alignas())
-	seg := wasm.Segment{Name: ".bss." + name, Align: alignLog2(align), Init: make([]byte, s.bits/8)}
-	if init != nil {
-		seg.Name, seg.Init = ".data."+name, init
+	align := max(t.Align(), d.Alignas(), 1)
+	seg := wasm.Segment{Name: ".bss." + name, Align: alignLog2(align), Init: make([]byte, size)}
+	if id.Case == cc.InitDeclaratorInit {
+		seg.Name = ".data." + name
+		if err := m.staticInit(id.Initializer, &seg); err != nil {
+			return err
+		}
 	}
+	idx := m.addSegment(seg)
+	if prev != nil {
+		// Referenced before its definition: define the symbol in place.
+		prev.defined, prev.seg = true, idx
+		m.o.Symbols[prev.sym] = wasm.Symbol{Kind: wasm.SymData, Flags: linkFlags(d), Name: name, Index: uint32(idx), Size: uint32(size)}
+		return nil
+	}
+	ds := &dataSym{defined: true, seg: idx}
+	ds.sym = m.symbol(wasm.Symbol{Kind: wasm.SymData, Flags: linkFlags(d), Name: name, Index: uint32(idx), Size: uint32(size)})
+	m.data[name] = ds
+	return nil
+}
+
+// addSegment places seg after the last one, at its alignment.
+func (m *module) addSegment(seg wasm.Segment) int {
 	var end uint32
 	if n := len(m.o.Segments); n != 0 {
 		last := m.o.Segments[n-1]
@@ -342,10 +362,41 @@ func (m *module) object(d *cc.Declarator, id *cc.InitDeclarator) error {
 	a := uint32(1) << seg.Align
 	seg.Offset = (end + a - 1) &^ (a - 1)
 	m.o.Segments = append(m.o.Segments, seg)
-	ds := &dataSym{defined: true, seg: len(m.o.Segments) - 1, s: s}
-	ds.sym = m.symbol(wasm.Symbol{Kind: wasm.SymData, Flags: linkFlags(d), Name: name, Index: uint32(ds.seg), Size: uint32(len(seg.Init))})
-	m.data[name] = ds
-	return nil
+	return len(m.o.Segments) - 1
+}
+
+// stringLiteral returns the local data symbol of a string literal of n
+// bytes (its array type's size), in a .rodata segment as clang's .L.str.
+func (m *module) stringLiteral(v string, n int64) uint32 {
+	init := make([]byte, n)
+	copy(init, v)
+	key := string(init)
+	if sym, ok := m.strings[key]; ok {
+		return sym
+	}
+	name := fmt.Sprintf(".L.str.%d", len(m.strings))
+	seg := wasm.Segment{Name: ".rodata." + name, Init: init}
+	if strings.IndexByte(key, 0) == len(key)-1 {
+		// Mergeable only when the one NUL is the last byte: wasm-ld splits
+		// a strings segment at each NUL ("\0right" lost its tail).
+		seg.Flags = wasm.SegStrings
+	}
+	idx := m.addSegment(seg)
+	sym := m.symbol(wasm.Symbol{Kind: wasm.SymData, Flags: wasm.SymBindingLocal, Name: name, Index: uint32(idx), Size: uint32(n)})
+	m.strings[key] = sym
+	return sym
+}
+
+// storable reports whether objects of type t can be laid out by the
+// generator: scalars and arrays of them (structs come with W4b).
+func storable(t cc.Type) bool {
+	if _, ok := scalarOf(t); ok {
+		return true
+	}
+	if a, ok := t.(*cc.ArrayType); ok && !a.IsVLA() {
+		return storable(a.Elem())
+	}
+	return false
 }
 
 func alignLog2(n int) uint32 {
@@ -362,11 +413,10 @@ func (m *module) global(n cc.Node, d *cc.Declarator) (*dataSym, error) {
 	if ds := m.data[d.Name()]; ds != nil {
 		return ds, nil
 	}
-	s, ok := scalarOf(d.Type())
-	if !ok {
-		return nil, unsupported(n, "object of type "+d.Type().String())
+	if !storable(d.Type()) {
+		return nil, unsupported(n, "object of type "+typeName(d.Type()))
 	}
-	ds := &dataSym{s: s}
+	ds := &dataSym{}
 	ds.sym = m.symbol(wasm.Symbol{Kind: wasm.SymData, Flags: wasm.SymUndefined, Name: d.Name()})
 	m.data[d.Name()] = ds
 	return ds, nil
@@ -387,5 +437,14 @@ func (m *module) finish() {
 	for _, c := range m.calls {
 		wasm.PutPaddedULEB(m.o.Funcs[c.fn].Body[c.offset:], index(c.callee))
 	}
-	m.o.Memory = len(m.data) != 0
+	m.o.Memory = len(m.data) != 0 || len(m.strings) != 0 || m.o.StackPointer
+}
+
+// stackPointer returns the symbol of env.__stack_pointer, importing it.
+func (m *module) stackPointer() uint32 {
+	if !m.o.StackPointer {
+		m.o.StackPointer = true
+		m.sp = m.symbol(wasm.Symbol{Kind: wasm.SymGlobal, Flags: wasm.SymUndefined, Index: 0})
+	}
+	return m.sp
 }
