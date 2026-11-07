@@ -93,9 +93,8 @@ sysroot, no host compiler (`NewConfig` is not used). Files taken:
 
 Of the nine gcc refusals, eight are wasi-libc's own `#error` (`signal.h`,
 `setjmp.h`, `sys/mman.h`) and one is C23 `f(...)`. Tests hold these as floors.
-cc/v4 panics on some malformed input (three reproducers are kept in
-`knownPanics` and the fuzz corpus); `cparse` recovers every panic into a
-`*PanicError`.
+`cparse` still recovers any panic into a `*PanicError`, but `FuzzSource` now
+fails on one: the panics and hangs it found in cc/v4 v4.30.5 are patched (below).
 
 ### The front end: `internal/cc`
 
@@ -109,6 +108,19 @@ patch must match exactly once, so a new cc/v4 release cannot skip one, and
   2^40 tokens and never returns.
 - A file missing from `Config.FS` is not opened, nor probed by
   `__has_include`, on the host file system (#4).
+- The inputs that `FuzzSource` found panicking or hanging are now errors
+  (#2). Each is in `formerPanics`, or `TestEmptyVariadicArguments`, with a
+  valid control:
+  - `#define` with no macro name;
+  - `##` at either end of a replacement list (C11 6.10.3.3p1);
+  - an argument list unterminated at the end of input;
+  - `M()` for `M(A,...)`;
+  - a non-constant bit-field width;
+  - `0={#,`;
+  - the end of input in a string, a character constant or a line splice;
+  - `^` alone, which looped forever.
+
+  A parser that keeps shifting the end of input is stopped after 4096 shifts.
 
 Upgrading cc/v4 means bumping `vendorcc.Version` and rerunning it.
 

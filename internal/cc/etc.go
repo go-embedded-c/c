@@ -630,7 +630,11 @@ func (f *fset) Position(pos int32) mtoken.Position {
 		}
 	}
 	it = f.items[l-1]
-	return it.file.Position(mtoken.Pos(pos - it.off))
+	p := mtoken.Pos(pos - it.off)
+	if end := it.file.Pos(it.file.Size()); p > end {
+		p = end
+	}
+	return it.file.Position(p)
 }
 
 // LongDouble64Flag returns the C compiler flag that switches long double to 64

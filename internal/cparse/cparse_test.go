@@ -169,39 +169,63 @@ func FuzzSource(f *testing.F) {
 		err := fr.Source("fuzz.c", src, cparse.Check)
 		var pe *cparse.PanicError
 		if errors.As(err, &pe) {
-			// Known, filed upstream defect (go-embedded-c/c issue): cc/v4
-			// v4.30.5 panics on some malformed input, see knownPanics.
-			// Source recovers it, which is what this target checks; a
-			// panic outside cc, a hang or a crash still fails.
-			if strings.Contains(pe.Stack, "github.com/go-embedded-c/c/internal/cc.") {
-				t.Skip("known: cc/v4 panics on malformed input; recovered")
-			}
 			t.Fatalf("%v\n%s", pe, pe.Stack)
 		}
 	})
 }
 
-// knownPanics are inputs that make cc/v4 v4.30.5 panic (found by FuzzSource),
-// with the function that panics.
-var knownPanics = []struct{ src, in string }{
-	{"#define", "(*cpp).define"},                                   // cpp.go:2918, bare directive at EOF
-	{"#define M(\nM(", "(*cpp).parseMacroArgs"},                    // cpp.go:1495, unterminated invocation
-	{"struct s { int a : QQQQQ3; };", "(*StructDeclarator).check"}, // check.go:3877, non-constant bit width
+// formerPanics are inputs that made cc/v4 v4.30.5 panic (found by
+// FuzzSource, go-embedded-c/c#2); internal/cc's patches make each an error.
+// The controls are the nearest valid inputs, which must still be accepted.
+var formerPanics = []struct{ src, msg, control string }{
+	{"#define", "macro name must be an identifier", "#define M\n"},
+	{"#define\n", "macro name must be an identifier", "#define M 1\n"},
+	{"#define M(\nM(", "unterminated argument list invoking a macro", "#define M(a) a\nint x = M(1);\n"},
+	{"struct s { int a : QQQQQ3; };", "expected integer expression", "struct s { int a : 3; };"},
+	// Not a panic but a hang: the type-qualifier loop shifted EOF forever.
+	{"^", "expected type qualifier", "int (^b)(void);"},
+	{"#define M##\nM", "'##' cannot appear at either end", "#define M(a, b) a##b\nint M(x, y);\n"},
+	{"#define M ##x\nM", "'##' cannot appear at either end", "#define M x\nint M;\n"},
+	// Hangs: the literal loops shifted EOF forever.
+	{"\"(0!0!\xd2\\", "not terminated", "char *s = \"(0!0!\\\\\";"},
+	{"char *s = \"abc", "not terminated", "char *s = \"abc\";"},
+	{"int c = 'a", "not terminated", "int c = 'a';"},
+	{"0={#,", "expected direct declarator", "int a[] = {0, 1};"},
+	{"\"\"\\", "not terminated", "char *s = \"\";"},
+	{"0\n\\", "unexpected", "int x = 0;\n"},
 }
 
-// TestKnownPanicsAreRecovered: each input returns a *PanicError from Source
-// instead of crashing. When cc/v4 is fixed the entry stops panicking and is
-// reported, to be dropped from the list.
-func TestKnownPanicsAreRecovered(t *testing.T) {
-	for _, k := range knownPanics {
+// TestEmptyVariadicArguments: `M()` for `M(A,...)` gives A and __VA_ARGS__
+// no tokens (C23 6.10.5.1; it panicked, go-embedded-c/c#2).
+func TestEmptyVariadicArguments(t *testing.T) {
+	for _, src := range []string{
+		"#define M(A,...) __VA_ARGS__\nM()",
+		"#define M(A,...) A __VA_ARGS__\nint M(x);\n",
+	} {
+		var pe *cparse.PanicError
+		if err := front(t).Source("p.c", []byte(src), cparse.Check); errors.As(err, &pe) {
+			t.Errorf("%q panics: %v", src, pe)
+		} else if err != nil {
+			t.Errorf("%q: %v", src, err)
+		}
+	}
+}
+
+func TestFormerPanicsAreErrors(t *testing.T) {
+	for _, k := range formerPanics {
 		err := front(t).Source("p.c", []byte(k.src), cparse.Check)
 		var pe *cparse.PanicError
-		if !errors.As(err, &pe) {
-			t.Logf("cc/v4 no longer panics on %q (%v): drop it from knownPanics", k.src, err)
-			continue
+		switch {
+		case errors.As(err, &pe):
+			t.Errorf("%q still panics: %v", k.src, pe)
+		case err == nil || !strings.Contains(err.Error(), k.msg):
+			t.Errorf("%q: %v, want %q", k.src, err, k.msg)
 		}
-		if !strings.Contains(pe.Stack, k.in) || pe.Error() == "" {
-			t.Errorf("%q: panicked elsewhere: %v", k.src, pe)
+		if err := front(t).Source("p.c", []byte(k.control), cparse.Check); err != nil {
+			t.Errorf("control %q: %v", k.control, err)
 		}
+	}
+	if err := front(t).Source("p.c", []byte("#define M"), cparse.Check); err != nil {
+		t.Errorf("a name-only #define at the end of input: %v", err)
 	}
 }

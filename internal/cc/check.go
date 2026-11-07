@@ -3403,6 +3403,7 @@ func (n *StructDeclarationList) check(c *ctx, s *StructOrUnionSpecifier, isVolat
 	for l := n; l != nil; l = l.StructDeclarationList {
 		fields = append(fields, l.StructDeclaration.check(c, isVolatile, isConst)...)
 	}
+	fields = nonNilFields(fields)
 	for i, f := range fields {
 		f.index = i
 		// trc("fld %q.%d at %p, set parent type %s", f.Name(), f.Index(), f, s.Type())
@@ -3876,6 +3877,10 @@ func (n *StructDeclarator) check(c *ctx, t Type, isAtomic, isConst, isVolatile, 
 		n.Declarator.isVolatile = isVolatile
 		n.Declarator.isRestrict = isRestrict
 		defer func() {
+			if r == nil {
+				return
+			}
+
 			n.Declarator.fixVolatileAndConst(c)
 			r.typ.typ = n.Declarator.Type()
 		}()

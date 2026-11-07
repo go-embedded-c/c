@@ -18,19 +18,20 @@ func fakeModule(t *testing.T, drop string) string {
 		"go.mod":       "module modernc.org/cc/v4\n",
 		"LICENSE":      "BSD\n",
 		"doc_test.go":  "package cc\n",
-		"cc.go":        "package cc\n\n/*\n",
-		"cpp.go":       "package cc\n\n/*\n",
-		"scanner.go":   "package cc\n\n/*\n",
 		"ignored.txt":  "",
 		"sub/other.go": "package sub\n",
 	}
+	patched := map[string]bool{}
 	for _, p := range patches {
-		if p.Old == drop {
-			continue
+		if !patched[p.File] {
+			patched[p.File] = true
+			files[p.File] = "package cc\n\n/*\n"
 		}
-		files[p.File] += p.Old
+		if p.Old != drop {
+			files[p.File] += p.Old
+		}
 	}
-	for _, n := range []string{"cc.go", "cpp.go", "scanner.go"} {
+	for n := range patched {
 		files[n] += "*/\n"
 	}
 	for n, s := range files {

@@ -112,6 +112,7 @@ var defaultKeywords = map[string]rune{
 
 type parser struct {
 	cpp        *cpp
+	eofShifts  int // shifts of the end of input (go-embedded-c patch)
 	fnScope    *Scope
 	funcTokens []Token
 	gotos      []*JumpStatement
@@ -254,6 +255,9 @@ func (p *parser) tok(t Token) (r Token) {
 
 func (p *parser) shift0() (r Token) {
 	r = p.toks[0]
+	if r.Ch == eof {
+		p.noProgress(r)
+	}
 	if r.Ch != eof {
 		switch {
 		case len(p.toks) == 1:
@@ -453,7 +457,9 @@ again:
 //		declaration-specifiers declarator declaration-list_opt compound-statement
 func (p *parser) functionDefinition(ds *DeclarationSpecifiers, d *Declarator) (r *FunctionDefinition) {
 	defer func() {
-		r.scope = p.fnScope
+		if r != nil {
+			r.scope = p.fnScope
+		}
 		p.fnScope = nil
 	}()
 	d.isFuncDef = true
@@ -583,6 +589,10 @@ func (p *parser) compoundStatement(inFreshNewScope, isFnScope bool, d *Declarato
 			}
 		}
 		defer func() {
+			if r == nil {
+				return
+			}
+
 			r.gotos = p.gotos
 		next:
 			for _, s := range r.Gotos() {
@@ -1455,6 +1465,11 @@ func (p *parser) initializerList(parent *Initializer) (r *InitializerList) {
 		default:
 			il = &InitializerList{Token: p.shift(false), Initializer: p.initializer(parent)}
 		}
+		if prev == nil {
+			r, prev = il, il
+			continue
+		}
+
 		prev.InitializerList = il
 		prev = il
 	}
@@ -2953,6 +2968,9 @@ func (p *parser) typeQualifierList(opt, acceptAttributes bool) (r *TypeQualifier
 			return r
 		case p.isTypeQualifier(ch):
 			r = &TypeQualifiers{Case: TypeQualifiersTypeQual, TypeQualifiers: r, TypeQualifier: p.typeQualifier(acceptAttributes)}
+		case ch == eof:
+			p.cpp.eh("%v: unexpected EOF, expected type qualifier", p.toks[0].Position())
+			return r
 		default:
 			t := p.shift(false)
 			p.cpp.eh("%v: unexpected %v, expected type qualifier", t.Position(), runeName(t.Ch))
