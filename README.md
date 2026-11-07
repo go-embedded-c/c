@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals and calls, and control flow structured after Ramsey (2022). 454 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3 and W4a are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), and memory (pointers, arrays, the linear-stack frame, string literals, static addresses). 762 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -203,6 +203,19 @@ W3 adds control flow:
 - `&&`, `||` and `?:` become wasm `if`s with a result inside the
   expression.
 
+W4a adds memory:
+
+- Pointers, with arithmetic, differences and unsigned comparisons.
+- Arrays, multi-dimensional too, and string literals.
+- Objects whose address is taken, in a frame on the linear stack. The
+  frame is reached through `__stack_pointer`, as BasicCABI.md and clang
+  lay it out. The prologue copies address-taken parameters into the frame,
+  and every return restores the stack pointer.
+- Static initialisers that hold addresses, written as
+  `R_WASM_MEMORY_ADDR_I32` data relocations.
+- Like clang, an assignment evaluates its right operand before the left
+  one. `x[0] |= f()` can observe the difference when `f` changes `x[0]`.
+
 The generator refuses anything else with an `*Unsupported` error that names
 the construct.
 
@@ -213,9 +226,15 @@ Three tests check the generator:
   checked locally. A deliberately miscompiled sign extension makes it
   fail.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-07, after W3, 454 files ran the same as under clang (10 after
-  W2) and none differed. The test holds that count as a floor and logs the
-  refusals by cause; pointers (W4) and variadic functions are now first.
+  2026-11-07, after W4a, 762 files ran the same as under clang (454 after
+  W3, 10 after W2). The test holds that count as a floor and logs the
+  refusals by cause; variadic functions and struct members (W4b) are now
+  first.
+  - No other file differs. The one known difference, `shiftdi-2.c`, comes
+    from the oracle compiling with `-std=gnu89`, where a large decimal
+    constant has another type (#20).
+  - A known difference that disappears makes the test fail, so the list
+    stays true.
 - `FuzzCompile` checks that the generator never panics and that every
   object it emits is a valid module.
 

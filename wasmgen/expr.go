@@ -8,7 +8,20 @@ import (
 )
 
 // intValue returns the value of a constant integer expression.
+//
+// For an expression of pointer type, cc/v4's value cannot be trusted: its
+// eval caches one value per node for two meanings, and &"X"[0] reports 88,
+// the value of "X"[0] (value.go, PostfixExpression.eval). A pointer
+// constant is taken only from an integer expression cast to the pointer
+// type, as in (char *)0.
 func intValue(e cc.ExpressionNode) (int64, bool) {
+	if e.Type() != nil && e.Type().Kind() == cc.Ptr {
+		x, ok := strip(e).(*cc.CastExpression)
+		if !ok || x.Case != cc.CastExpressionCast {
+			return 0, false
+		}
+		return intValue(x.CastExpression)
+	}
 	switch v := e.Value().(type) {
 	case cc.Int64Value:
 		return int64(v), true
@@ -104,6 +117,15 @@ func (g *fgen) rvalue(e cc.ExpressionNode) (scalar, error) {
 	}
 	defer func() { g.depth-- }()
 	t := e.Type()
+	if a, ok := t.(*cc.ArrayType); ok {
+		// An array is converted to a pointer to its first element.
+		ps, _ := scalarOf(a.Decay())
+		return ps, g.addr(e)
+	}
+	if designatesArray(e) {
+		ps, _ := scalarOf(t) // already typed as the decayed pointer
+		return ps, g.addr(e)
+	}
 	s, ok := scalarOf(t)
 	if !ok {
 		return scalar{}, unsupported(e, "value of type "+typeName(t))
@@ -237,7 +259,41 @@ func (g *fgen) rvalue(e cc.ExpressionNode) (scalar, error) {
 		if x.Case == cc.AdditiveExpressionSub {
 			op = opI32Sub
 		}
-		return s, g.binary(x.AdditiveExpression, x.MultiplicativeExpression, s, op)
+		a, b := x.AdditiveExpression, x.MultiplicativeExpression
+		pa, pb := isPtrOrArray(a.Type()), isPtrOrArray(b.Type())
+		switch {
+		case pa && pb:
+			// p - q: the number of elements between them (C11 6.5.6p9).
+			ps, _ := scalarOf(a.Type().Decay())
+			if err := g.ptrValue(a); err != nil {
+				return s, err
+			}
+			if err := g.ptrValue(b); err != nil {
+				return s, err
+			}
+			g.op(opI32Sub)
+			if ps.elem != 1 {
+				g.constant(ps.elem, intScalar)
+				g.op(opI32DivS)
+			}
+			g.convert(intScalar, s)
+			return s, nil
+		case pa || pb:
+			// p ± n, n + p: n scaled by the size of the element.
+			p, n := a, b
+			if pb {
+				p, n = b, a
+			}
+			if err := g.ptrValue(p); err != nil {
+				return s, err
+			}
+			if err := g.offset(n, s.elem); err != nil {
+				return s, err
+			}
+			g.op(op)
+			return s, nil
+		}
+		return s, g.binary(a, b, s, op)
 	case *cc.MultiplicativeExpression:
 		var op byte
 		switch x.Case {
@@ -269,8 +325,10 @@ func (g *fgen) rvalue(e cc.ExpressionNode) (scalar, error) {
 			return s, g.call(x)
 		case cc.PostfixExpressionInc, cc.PostfixExpressionDec:
 			return s, g.incdec(x, x.PostfixExpression, x.Case == cc.PostfixExpressionInc, true, true)
+		case cc.PostfixExpressionIndex:
+			return s, g.load(x)
 		}
-		return s, unsupported(x, "postfix "+x.Case.String()+" (W4)")
+		return s, unsupported(x, "postfix "+x.Case.String()+" (W4b)")
 	}
 	return s, unsupported(e, "expression")
 }
@@ -315,6 +373,17 @@ func (g *fgen) binary(a, b cc.ExpressionNode, s scalar, op byte) error {
 
 // compare pushes the int result of comparing a and b in their common type.
 func (g *fgen) compare(a, b cc.ExpressionNode, signed, unsigned byte) error {
+	if isPtrOrArray(a.Type()) || isPtrOrArray(b.Type()) {
+		// Pointers compare as unsigned addresses; a null pointer constant
+		// or another integer converts to an address (C11 6.5.8, 6.5.9).
+		for _, e := range []cc.ExpressionNode{a, b} {
+			if err := g.ptrValue(e); err != nil {
+				return err
+			}
+		}
+		g.op(unsigned)
+		return nil
+	}
 	if _, ok := scalarOf(a.Type()); !ok {
 		return unsupported(a, "comparison of "+typeName(a.Type()))
 	}
@@ -385,6 +454,13 @@ func (g *fgen) unary(x *cc.UnaryExpression, s scalar) error {
 		return nil
 	case cc.UnaryExpressionInc, cc.UnaryExpressionDec:
 		return g.incdec(x, x.UnaryExpression, x.Case == cc.UnaryExpressionInc, false, true)
+	case cc.UnaryExpressionAddrof:
+		if x.CastExpression.Type().Kind() == cc.Function {
+			return unsupported(x, "address of a function (W4c)")
+		}
+		return g.addr(x.CastExpression)
+	case cc.UnaryExpressionDeref:
+		return g.load(x)
 	}
 	return unsupported(x, "unary "+x.Case.String())
 }
@@ -483,86 +559,71 @@ func (g *fgen) effect(e cc.ExpressionNode) error {
 	return nil
 }
 
-// target is an lvalue W2 can store to: a local, or a file-scope object.
+// target is a scalar lvalue: a register local (a wasm local), or an object
+// in memory, whose address e designates.
 type target struct {
-	local  bool
-	index  uint32
-	global *dataSym
-	s      scalar
+	local bool
+	index uint32
+	e     cc.ExpressionNode // the lvalue, for memory
+	addr  uint32            // a local holding its address, once address ran
+	s     scalar
 }
 
-func (g *fgen) lvalue(e cc.ExpressionNode) (target, error) {
-	for {
-		switch x := e.(type) {
-		case *cc.PrimaryExpression:
-			if x.Case == cc.PrimaryExpressionExpr {
-				e = x.ExpressionList
-				continue
-			}
-			if x.Case != cc.PrimaryExpressionIdent {
-				break
-			}
-			d, ok := x.ResolvedTo().(*cc.Declarator)
-			if !ok {
-				break
-			}
-			s, ok := scalarOf(d.Type())
-			if !ok {
-				return target{}, unsupported(x, "object of type "+typeName(d.Type()))
-			}
+func (g *fgen) lvalue(e cc.ExpressionNode) (*target, error) {
+	e = strip(e)
+	s, ok := scalarOf(e.Type())
+	if !ok {
+		return nil, unsupported(e, "lvalue of type "+typeName(e.Type()))
+	}
+	if x, ok := e.(*cc.PrimaryExpression); ok && x.Case == cc.PrimaryExpressionIdent {
+		if d, ok := x.ResolvedTo().(*cc.Declarator); ok {
 			if i, ok := g.vars[d]; ok {
-				return target{local: true, index: i, s: s}, nil
-			}
-			if d.StorageDuration() != cc.Static {
-				return target{}, unsupported(x, "object without a local")
-			}
-			ds, err := g.m.global(x, d)
-			if err != nil {
-				return target{}, err
-			}
-			return target{global: ds, s: s}, nil
-		case *cc.PostfixExpression:
-			if x.Case == cc.PostfixExpressionPrimary {
-				e = x.PrimaryExpression
-				continue
-			}
-		case *cc.ExpressionList:
-			if x.ExpressionList == nil {
-				e = x.AssignmentExpression
-				continue
+				return &target{local: true, index: i, s: s}, nil
 			}
 		}
-		return target{}, unsupported(e, "lvalue (W4)")
 	}
+	return &target{e: e, s: s}, nil
 }
 
-// memarg appends the alignment and a relocated offset addressing the
-// object of t (the address is the constant 0 pushed before).
-func (g *fgen) memarg(t target, op byte, align uint32) {
+// memarg appends a load or store with its alignment and offset 0.
+func (g *fgen) memarg(op byte, align uint32) {
 	g.op(op)
 	g.uleb(uint64(align))
-	g.reloc(wasm.RelocMemoryAddrLEB, t.global.sym)
+	g.uleb(0)
 }
 
-func (g *fgen) load(x *cc.PrimaryExpression) error {
-	t, err := g.lvalue(x)
-	if err != nil {
+// address pushes the address of t when it is in memory, keeping a copy for
+// loadTarget; a register local has none.
+func (g *fgen) address(t *target) error {
+	if t.local {
+		return nil
+	}
+	if err := g.addr(t.e); err != nil {
 		return err
 	}
+	t.addr = g.local(wasm.I32)
+	g.op(opLocalTee)
+	g.uleb(uint64(t.addr))
+	return nil
+}
+
+// loadTarget pushes the value of t; address ran before for memory.
+func (g *fgen) loadTarget(t *target) error {
 	if t.local {
 		g.op(opLocalGet)
 		g.uleb(uint64(t.index))
 		return nil
 	}
-	g.op(opI32Const, 0)
+	g.op(opLocalGet)
+	g.uleb(uint64(t.addr))
 	op, align := t.s.load()
-	g.memarg(t, op, align)
+	g.memarg(op, align)
 	return nil
 }
 
 // store stores the value on the stack into t, leaving a copy when want. For
-// a global, the caller pushed the address (i32.const 0) before the value.
-func (g *fgen) store(t target, want bool) {
+// memory, address pushed the address before the value.
+func (g *fgen) store(t *target, want bool) {
 	if t.local {
 		g.op(pick(want, opLocalTee, opLocalSet))
 		g.uleb(uint64(t.index))
@@ -575,17 +636,28 @@ func (g *fgen) store(t target, want bool) {
 		g.uleb(uint64(tmp))
 	}
 	op, align := t.s.store()
-	g.memarg(t, op, align)
+	g.memarg(op, align)
 	if want {
 		g.op(opLocalGet)
 		g.uleb(uint64(tmp))
 	}
 }
 
-func (g *fgen) address(t target) {
-	if !t.local {
-		g.op(opI32Const, 0)
+// load pushes the value of the lvalue e.
+func (g *fgen) load(e cc.ExpressionNode) error {
+	t, err := g.lvalue(e)
+	if err != nil {
+		return err
 	}
+	if t.local {
+		return g.loadTarget(t)
+	}
+	if err := g.addr(t.e); err != nil {
+		return err
+	}
+	op, align := t.s.load()
+	g.memarg(op, align)
+	return nil
 }
 
 var binaryOps = map[cc.AssignmentExpressionCase][2]byte{ // signed, unsigned
@@ -601,19 +673,32 @@ var binaryOps = map[cc.AssignmentExpressionCase][2]byte{ // signed, unsigned
 	cc.AssignmentExpressionOr:  {opI32Or, opI32Or},
 }
 
-// assign compiles E1 = E2 and E1 op= E2 (C11 6.5.16).
+// assign compiles E1 = E2 and E1 op= E2 (C11 6.5.16). The two operands
+// are unsequenced in C; like clang (CGExprScalar.cpp, VisitBinAssign and
+// EmitCompoundAssignLValue: "Emit the RHS first") E2 is evaluated before
+// E1's address and value, which a call in E2 can observe (gcc torture
+// pr58943.c: x[0] |= foo(), where foo changes x[0]).
 func (g *fgen) assign(x *cc.AssignmentExpression, want bool) error {
 	t, err := g.lvalue(x.UnaryExpression)
 	if err != nil {
 		return err
 	}
-	g.address(t)
 	if x.Case == cc.AssignmentExpressionAssign {
 		from, err := g.rvalue(x.AssignmentExpression)
 		if err != nil {
 			return err
 		}
 		g.convert(from, t.s)
+		if !t.local {
+			v := g.local(t.s.vt)
+			g.op(opLocalSet)
+			g.uleb(uint64(v))
+			if err := g.address(t); err != nil {
+				return err
+			}
+			g.op(opLocalGet)
+			g.uleb(uint64(v))
+		}
 		g.store(t, want)
 		return nil
 	}
@@ -623,8 +708,35 @@ func (g *fgen) assign(x *cc.AssignmentExpression, want bool) error {
 	}
 	// E1 op= E2 is E1 = E1 op E2 with E1 evaluated once; the operation is
 	// in the promoted type of E1 for shifts, in the common type otherwise.
-	if _, ok := scalarOf(x.AssignmentExpression.Type()); !ok {
+	rs, ok := scalarOf(x.AssignmentExpression.Type())
+	if !ok {
 		return unsupported(x, "compound assignment of "+typeName(x.AssignmentExpression.Type()))
+	}
+	if t.s.ptr {
+		// p += n, p -= n: n scaled by the size of what p points to.
+		if x.Case != cc.AssignmentExpressionAdd && x.Case != cc.AssignmentExpressionSub || rs.ptr {
+			return unsupported(x, "compound assignment of a pointer")
+		}
+		if err := g.offset(x.AssignmentExpression, t.s.elem); err != nil {
+			return err
+		}
+		r := g.local(wasm.I32)
+		g.op(opLocalSet)
+		g.uleb(uint64(r))
+		if err := g.address(t); err != nil {
+			return err
+		}
+		if err := g.loadTarget(t); err != nil {
+			return err
+		}
+		g.op(opLocalGet)
+		g.uleb(uint64(r))
+		g.op(pick(x.Case == cc.AssignmentExpressionAdd, opI32Add, opI32Sub))
+		g.store(t, want)
+		return nil
+	}
+	if rs.ptr {
+		return unsupported(x, "compound assignment of a pointer")
 	}
 	var opT cc.Type
 	if x.Case == cc.AssignmentExpressionLsh || x.Case == cc.AssignmentExpressionRsh {
@@ -636,76 +748,69 @@ func (g *fgen) assign(x *cc.AssignmentExpression, want bool) error {
 	if !ok {
 		return unsupported(x, "compound assignment in "+typeName(opT))
 	}
-	if err := g.loadTarget(t); err != nil {
-		return err
-	}
-	g.convert(t.s, os)
 	from, err := g.rvalue(x.AssignmentExpression)
 	if err != nil {
 		return err
 	}
 	g.convert(from, os)
+	r := g.local(os.vt)
+	g.op(opLocalSet)
+	g.uleb(uint64(r))
+	if err := g.address(t); err != nil {
+		return err
+	}
+	if err := g.loadTarget(t); err != nil {
+		return err
+	}
+	g.convert(t.s, os)
+	g.op(opLocalGet)
+	g.uleb(uint64(r))
 	g.op(opFor(pick(os.signed, ops[0], ops[1]), os))
 	g.convert(os, t.s)
 	g.store(t, want)
 	return nil
 }
 
-func (g *fgen) loadTarget(t target) error {
-	if t.local {
-		g.op(opLocalGet)
-		g.uleb(uint64(t.index))
-		return nil
-	}
-	g.op(opI32Const, 0)
-	op, align := t.s.load()
-	g.memarg(t, op, align)
-	return nil
-}
-
-// incdec compiles ++E, --E, E++ and E--: E += 1 in the promoted type,
-// yielding the old value for the postfix forms.
+// incdec compiles ++E, --E, E++ and E--: E += 1 in the promoted type (by
+// the size of the object pointed to, for a pointer), yielding the old value
+// for the postfix forms.
 func (g *fgen) incdec(n, e cc.ExpressionNode, inc, post, want bool) error {
 	t, err := g.lvalue(e)
 	if err != nil {
 		return err
 	}
-	os := t.s
-	if os.bits < 32 {
-		os = scalar{vt: wasm.I32, bits: 32, signed: true}
+	os, one := t.s, int64(1)
+	switch {
+	case t.s.ptr:
+		os, one = scalar{vt: wasm.I32, bits: 32}, t.s.elem
+	case os.bits < 32:
+		os = intScalar
 	}
 	op := byte(opI32Add)
 	if !inc {
 		op = opI32Sub
 	}
-	step := func() {
-		g.convert(t.s, os)
-		g.constant(1, os)
-		g.op(opFor(op, os))
-		g.convert(os, t.s)
+	if err := g.address(t); err != nil {
+		return err
 	}
-	if !post || !want {
-		g.address(t)
-		if err := g.loadTarget(t); err != nil {
-			return err
-		}
-		step()
-		g.store(t, want)
-		return nil
-	}
-	old := g.local(t.s.vt)
 	if err := g.loadTarget(t); err != nil {
 		return err
 	}
-	g.op(opLocalSet)
-	g.uleb(uint64(old))
-	g.address(t)
-	g.op(opLocalGet)
-	g.uleb(uint64(old))
-	step()
-	g.store(t, false)
-	g.op(opLocalGet)
-	g.uleb(uint64(old))
+	var old uint32
+	if post && want {
+		old = g.local(t.s.vt)
+		g.op(opLocalTee)
+		g.uleb(uint64(old))
+	}
+	g.convert(t.s, os)
+	g.constant(one, os)
+	g.op(opFor(op, os))
+	g.convert(os, t.s)
+	g.store(t, want && !post)
+	if post && want {
+		g.op(opLocalGet)
+		g.uleb(uint64(old))
+	}
 	_ = n
 	return nil
 }

@@ -48,6 +48,13 @@ type fgen struct {
 	breaks    []*block // innermost last
 	continues []*block
 	cases     map[*cc.LabeledStatement]*block
+
+	// The linear-stack frame (mem.go), when the function needs one.
+	frame     bool
+	fp, top   uint32 // locals: the frame's base, and __stack_pointer on entry
+	frameSize int64
+	slots     map[*cc.Declarator]int64 // objects in the frame, by offset
+	spilled   []spilledParam
 }
 
 func (g *fgen) op(b ...byte) { g.cur.code = append(g.cur.code, b...) }
@@ -102,27 +109,64 @@ func (m *module) function(fd *cc.FunctionDefinition) error {
 	if !ok || f == nil {
 		return unsupported(d, "function definition of type "+typeName(d.Type()))
 	}
-	g := &fgen{m: m, fn: f.pos, vars: map[*cc.Declarator]uint32{}, void: isVoid(ft.Result()), cases: map[*cc.LabeledStatement]*block{}}
+	g := &fgen{m: m, fn: f.pos, vars: map[*cc.Declarator]uint32{}, void: isVoid(ft.Result()),
+		cases: map[*cc.LabeledStatement]*block{}, slots: map[*cc.Declarator]int64{}}
 	if !g.void {
 		g.result, _ = scalarOf(ft.Result()) // signature checked it
+	}
+	g.nparams = uint32(len(params(ft)))
+	if g.frame = needsFrame(ft, fd.CompoundStatement); g.frame {
+		g.fp, g.top = g.local(wasm.I32), g.local(wasm.I32)
 	}
 	for i, p := range params(ft) {
 		if p.Declarator == nil {
 			return unsupported(d, "unnamed parameter")
 		}
 		if p.Declarator.AddressTaken() {
-			return unsupported(p.Declarator, "address-taken parameter")
+			s := f.params[i]
+			slot := g.frameSlot(int64(s.bits/8), s.bits/8)
+			g.slots[p.Declarator] = slot
+			g.spilled = append(g.spilled, spilledParam{param: uint32(i), slot: slot, s: s})
+			continue
 		}
 		g.vars[p.Declarator] = uint32(i)
 	}
-	g.nparams = uint32(len(params(ft)))
 	g.cur = g.newBlock()
+	// The size expressions of a parameter declared as an array (int
+	// b[a++]) are evaluated on entry (C11 6.9.1p10), for their effects:
+	// the parameter itself is adjusted to a pointer.
+	for _, p := range params(ft) {
+		for dd := p.Declarator.DirectDeclarator; dd != nil; dd = dd.DirectDeclarator {
+			switch dd.Case {
+			case cc.DirectDeclaratorArr, cc.DirectDeclaratorStaticArr, cc.DirectDeclaratorArrStatic:
+				if e := dd.AssignmentExpression; e != nil && !e.Pure() {
+					if err := g.effect(e); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
 	if err := g.compound(fd.CompoundStatement); err != nil {
 		return err
 	}
 	// Falling off the end: main returns 0 (C11 5.1.2.2.3); for another
 	// function the value is unusable, and any value will do.
 	g.ret()
+	if g.frame {
+		// The frame size is known now: put the prologue before the entry
+		// block's code, moving its relocations and call sites.
+		p, entry := g.prologue(), g.blocks[0]
+		shift := uint32(len(p.code))
+		for i := range entry.relocs {
+			entry.relocs[i].Offset += shift
+		}
+		for i := range entry.calls {
+			entry.calls[i].offset += shift
+		}
+		entry.code = append(p.code, entry.code...)
+		entry.relocs = append(p.relocs, entry.relocs...)
+	}
 	body, calls, err := g.structure(d)
 	if err != nil {
 		return err
@@ -148,6 +192,7 @@ func (g *fgen) ret() {
 	if !g.void {
 		g.zero(g.result)
 	}
+	g.epilogue()
 	g.op(opReturn)
 	g.cur.term = termReturn
 }
@@ -248,6 +293,7 @@ func (g *fgen) jumpStatement(j *cc.JumpStatement) error {
 					return err
 				}
 				g.convert(from, g.result)
+				g.epilogue()
 				g.op(opReturn)
 				g.cur.term = termReturn
 				g.dead()
@@ -467,12 +513,13 @@ func (g *fgen) localDeclaration(decl *cc.Declaration) error {
 			continue
 		case d.IsStatic():
 			return unsupported(d, "static local")
-		case d.AddressTaken():
-			return unsupported(d, "address-taken local (W4)")
 		}
 		s, ok := scalarOf(d.Type())
-		if !ok {
-			return unsupported(d, "local of type "+d.Type().String())
+		if !ok || d.AddressTaken() {
+			if err := g.memoryLocal(d, id); err != nil {
+				return err
+			}
+			continue
 		}
 		idx, ok := g.vars[d]
 		if !ok {

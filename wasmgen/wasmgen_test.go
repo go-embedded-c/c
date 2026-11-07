@@ -35,15 +35,16 @@ func TestUnsupported(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ src, what string }{
-		{"int main(int c, char **v) { return 0; }", "parameter of type pointer to pointer to char"},
+		{"int main(int c, char **v) { return 0; }", "main with parameters"},
 		{"int main(void) { goto l; l: return 0; }", "jump JumpStatementGoto (W7)"},
 		{"int main(void) { int x = 1; switch (x) { case 1 ... 3: return 1; } return 0; }", "case range"},
 		{"int main(void) { int x = 1; return x ?: 2; }", "?: without a middle operand"},
-		{"int main(void) { int x = 1; int *p = &x; return 0; }", "address-taken local (W4)"},
 		{"int main(void) { static int n; return n; }", "static local"},
 		{"double d; int main(void) { return 0; }", "file-scope object of type double"},
 		{"int g(int, ...); int main(void) { return g(1, 2); }", "call of a variadic function"},
-		{"int main(void) { int a[2]; return 0; }", "local of type array of 2 int"},
+		{"struct S { int a; }; int main(void) { struct S s; return 0; }", "local of type struct S {a int}"},
+		{"int f(void); int (*fp)(void) = f; int main(void) { return 0; }", "address of a function (W4c)"},
+		{"int f(int n) { int a[n]; return 0; } int main(void) { return f(2); }", "variable-length array"},
 		{"int main(void) { return __builtin_clz(1); }", "builtin __builtin_clz"},
 	} {
 		_, err := compile(t, f, tc.src)
@@ -212,6 +213,16 @@ func TestAgainstClang(t *testing.T) {
 		"int f(void) { return 26; }\n#line 1 \"renamed.c\"\nint main(void) { return f(); }",
 		"void abort(void); long long a = -7; long long llabs(long long); int main(void) { return (int)llabs(a) + abs(-3) * 10; } long long llabs(long long b) { abort(); }",
 		"void f(void) __attribute__((aligned(256))); void f(void) {} void g(void) {} int x __attribute__((aligned(64))); long long ll;\nint main(void) { return __alignof__(f) + __alignof__(g) * 1000 + __alignof__(x) * 100000 + __alignof__(ll) * 10000000; }",
+		// W4a: memory
+		"int g[4] = {1, 2, 3, 4}; int *gp = &g[2]; const char *s = \"hi\";\nstatic void set(int *p, int v) { *p = v; }\nint main(void) { int x = 5; int a[3]; set(&x, 7); a[1] = x + *gp; return a[1] + s[1] + g[3]; }",
+		"int sum(int *p, int n) { int s = 0; while (n--) s += *p++; return s; } int main(void) { int a[10], i; for (i = 0; i < 10; i++) a[i] = i * i; return sum(a, 10) + sum(a + 3, 4) * 1000; }",
+		"int f(int x) { int *p = &x; *p += 4; return x; } int main(void) { return f(38); }",
+		"int main(void) { char s[8] = \"abc\"; char *p = s; int n = 0; while (*p) n = n * 256 + *p++; return n + s[5] + sizeof s; }",
+		"int m[3][4]; int main(void) { int i, j, t = 0; for (i = 0; i < 3; i++) for (j = 0; j < 4; j++) m[i][j] = i * 10 + j; for (i = 0; i < 3; i++) t += m[i][3 - i]; return t + (&m[2][1] - &m[0][0]); }",
+		"int a[] = {5, 6, 7}; int *b[3] = {&a[2], a, &a[1]}; int main(void) { return *b[0] * 100 + *b[1] * 10 + b[2][0] + (b[0] - b[1]) * 1000; }",
+		"static char *msg = \"hello\"; int main(void) { char *p = msg; unsigned h = 0; while (*p) h = h * 31 + *p++; return h + (p - msg); }",
+		"int main(void) { int a[4] = {1, 2}, *p = a, *q = &a[3]; long long ll[2] = {-1LL, 1LL << 40}; return (q > p) + (p == a) * 2 + a[3] * 4 + (int)(ll[1] >> 38) * 8 + (ll[0] < 0) * 64; }",
+		"void abort(void); int g; int *get(void) { return &g; } int main(void) { *get() = 9; ++*get(); (*get())++; if (g != 11) abort(); return g; }",
 	} {
 		h.check(src)
 	}
@@ -268,9 +279,11 @@ var ctypes = []ctype{
 }
 
 type gen struct {
-	r    *rand.Rand
-	vars []string
-	typ  map[string]ctype
+	r      *rand.Rand
+	vars   []string
+	typ    map[string]ctype
+	arrays []string // arrays of 4 elements, indexed by (e) & 3
+	ptr    string   // a pointer to one of vars, when set
 }
 
 func (g *gen) pickType() ctype { return ctypes[g.r.IntN(len(ctypes))] }
@@ -292,8 +305,13 @@ func (g *gen) constant() string {
 // are masked, divisors are made odd (non-zero) in an unsigned type.
 func (g *gen) expr(depth int) string {
 	if depth <= 0 || g.r.IntN(4) == 0 {
-		if g.r.IntN(3) == 0 || len(g.vars) == 0 {
+		switch k := g.r.IntN(6); {
+		case k == 0 || len(g.vars) == 0:
 			return "(" + g.pickType().name + ")" + g.constant()
+		case k == 1 && len(g.arrays) != 0:
+			return g.element(depth)
+		case k == 2 && g.ptr != "":
+			return "(*" + g.ptr + ")"
 		}
 		return g.vars[g.r.IntN(len(g.vars))]
 	}
@@ -347,6 +365,16 @@ func (g *gen) expr(depth int) string {
 	return "(" + a + ", " + b + ")"
 }
 
+// element is an array element with an index that is always in bounds.
+func (g *gen) element(depth int) string {
+	a := g.arrays[g.r.IntN(len(g.arrays))]
+	saved := g.arrays
+	g.arrays = nil // no nested indexing: keeps the expressions small
+	i := g.expr(depth - 1)
+	g.arrays = saved
+	return a + "[((int)(" + i + ")) & 3]"
+}
+
 // statement writes a random statement. Loops run a bounded number of times
 // on a counter (i0, i1, i2 by nesting level) that nothing else assigns, so
 // every program terminates; break and continue appear only inside loops.
@@ -359,8 +387,17 @@ func (g *gen) statement(b *strings.Builder, ind string, level int, inLoop bool) 
 		kind = r.IntN(6)
 	}
 	switch kind {
-	case 0, 1:
+	case 0:
 		fmt.Fprintf(b, "%s%s = %s;\n", ind, v, g.expr(3))
+	case 1:
+		switch {
+		case len(g.arrays) != 0 && r.IntN(2) == 0:
+			fmt.Fprintf(b, "%s%s = %s;\n", ind, g.element(2), g.expr(3))
+		case g.ptr != "":
+			fmt.Fprintf(b, "%s*%s = %s;\n", ind, g.ptr, g.expr(3))
+		default:
+			fmt.Fprintf(b, "%s%s = %s;\n", ind, v, g.expr(3))
+		}
 	case 2:
 		ops := []string{"&=", "|=", "^="}
 		fmt.Fprintf(b, "%s%s %s %s;\n", ind, v, ops[r.IntN(len(ops))], g.expr(2))
@@ -447,6 +484,8 @@ func randomProgram(r *rand.Rand) string {
 	g.vars = []string{"p", "q"}
 	fmt.Fprintf(&b, "static %s helper(%s p, int q) {\n\tif (%s) return %s;\n\treturn %s;\n}\n", rt.name, pt.name, g.expr(2), g.expr(3), g.expr(3))
 	g.vars = saved
+	at := g.pickType()
+	fmt.Fprintf(&b, "%s ga[4] = {(%s)%s, (%s)%s};\n", at.name, at.name, g.constant(), at.name, g.constant())
 	b.WriteString("int main(void) {\n\tint i0, i1, i2;\n")
 	for i := range 5 {
 		t := g.pickType()
@@ -454,10 +493,20 @@ func randomProgram(r *rand.Rand) string {
 		fmt.Fprintf(&b, "\t%s %s = (%s)(%s);\n", t.name, name, t.name, g.expr(2))
 		g.vars, g.typ[name] = append(g.vars, name), t
 	}
+	lt := g.pickType()
+	fmt.Fprintf(&b, "\t%s la[4] = {(%s)(%s)};\n", lt.name, lt.name, g.expr(2))
+	target := g.vars[3+r.IntN(2)] // a local: taking its address puts it in memory
+	fmt.Fprintf(&b, "\t%s *pv = &%s;\n", g.typ[target].name, target)
+	g.arrays, g.ptr = []string{"ga", "la"}, "pv"
 	for range 10 {
 		g.statement(&b, "\t", 0, false)
 	}
 	b.WriteString("\tunsigned h = 0;\n")
+	for _, a := range g.arrays {
+		for i := range 4 {
+			fmt.Fprintf(&b, "\th = h * 31u + (unsigned)%s[%d] + (unsigned)((unsigned long long)%s[%d] >> 32);\n", a, i, a, i)
+		}
+	}
 	for _, v := range g.vars {
 		fmt.Fprintf(&b, "\th = h * 31u + (unsigned)%s + (unsigned)((unsigned long long)%s >> 32);\n", v, v)
 	}
