@@ -20,8 +20,8 @@ is checked against a reference, never against expectations written by hand.
 | milestone | contents | state |
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
-| M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses, prelude; still to come: wasm32 `ABI` upstream, go-notebook adapter | **in progress** |
-| M2 code generator | cc/v4 AST → wasm32 | planned |
+| M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1 is done: encoder, object writer, `wasm-ld` + wazero harness against clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -166,6 +166,20 @@ cannot read the host file system, by two independent layers:
   a word that occurs in an include path.
 - `internal/cc` does not fall back to the host. `TestHostFilesUnreachable`
   checks both layers, against a control that reads the host file.
+
+## Code generator (M2, in progress)
+
+`wasmgen.Compile(ast, file)` turns a checked translation unit into a
+relocatable wasm32 object in the tool-conventions `Linking.md` format: the
+format clang writes and wasi-libc's `libc.a` is made of. Until the cell
+linker of M3 exists, `oracle.Link` links the object with the pinned
+`wasm-ld`, `crt1.o` and `libc.a`. Tests then run the program in the same
+wazero as clang's, and compare exit status and output (`TestAgainstClang`).
+
+W1 compiles `int main(void)` returning a constant. The generator refuses
+anything else with an `*Unsupported` error that names the construct, so a
+corpus run counts refusals by cause. `FuzzCompile` checks two things: the
+generator never panics, and every object it emits is a valid module.
 
 ## Not yet
 

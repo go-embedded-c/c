@@ -110,10 +110,21 @@ const (
 func (f *Front) File(path string, lvl Level) error { return f.Source(path, nil, lvl) }
 
 // Source is File over in-memory text (src != nil) or a file (src == nil).
-func (f *Front) Source(name string, src []byte, lvl Level) (err error) {
+func (f *Front) Source(name string, src []byte, lvl Level) error {
+	_, err := f.run(name, src, lvl)
+	return err
+}
+
+// Translate is Source at level Check, returning the checked AST: what the
+// code generator compiles.
+func (f *Front) Translate(name string, src []byte) (*cc.AST, error) {
+	return f.run(name, src, Check)
+}
+
+func (f *Front) run(name string, src []byte, lvl Level) (ast *cc.AST, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = &PanicError{Value: r, Stack: string(debug.Stack())}
+			ast, err = nil, &PanicError{Value: r, Stack: string(debug.Stack())}
 		}
 	}()
 	main := cc.Source{Name: name}
@@ -126,9 +137,7 @@ func (f *Front) Source(name string, src []byte, lvl Level) (err error) {
 		main,
 	}
 	if lvl == Check {
-		_, err = cc.Translate(f.cfg, srcs)
-	} else {
-		_, err = cc.Parse(f.cfg, srcs)
+		return cc.Translate(f.cfg, srcs)
 	}
-	return err
+	return cc.Parse(f.cfg, srcs)
 }

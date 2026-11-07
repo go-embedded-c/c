@@ -69,6 +69,7 @@ jobs:
           - { pkg: ./internal/cparse, target: FuzzSource }
           - { pkg: ./cell, target: FuzzSplit }
           - { pkg: ./cell, target: FuzzAnalyze }
+          - { pkg: ./wasmgen, target: FuzzCompile }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -113,7 +114,7 @@ jobs:
         env:
           CORACLE_CTESTSUITE: ${{ runner.temp }}/c-testsuite/tests/single-exec
           CORACLE_GCC_TORTURE: ${{ runner.temp }}/gcc/gcc/testsuite/gcc.c-torture/execute
-        run: go test -count=1 -timeout=30m -v -run 'Oracle|Golden|Corpus|CTestsuite|Headers|Predefined|Run|Programs' ./...
+        run: go test -count=1 -timeout=30m -v -run 'Oracle|Golden|Corpus|CTestsuite|Headers|Predefined|Run|Programs|AgainstClang' ./...
       - name: The oracle over the gcc torture suite
         run: go run ./cmd/coracle corpus --dir "$RUNNER_TEMP/gcc/gcc/testsuite/gcc.c-torture/execute" --out gcc-torture.tsv
       - name: The goldens regenerate unchanged on linux
