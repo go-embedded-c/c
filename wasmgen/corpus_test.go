@@ -16,7 +16,19 @@ import (
 // gccTortureFloor is how many gcc 15.2.0 gcc.c-torture/execute files we
 // compile, link and run with clang's exit status and output. A change of
 // the generator must not lower it.
-const gccTortureFloor = 454 // W3, measured 2026-11-07: 454 same, 0 different (W2: 10)
+const gccTortureFloor = 762 // W4a, measured 2026-11-07: 762 same, 0 different, 1 known (W3: 454, W2: 10)
+
+// knownDifferent are files whose result differs from clang's for a reason
+// that is not the generator's, each examined. A file listed here that
+// starts to agree is an error, so that the list stays true.
+var knownDifferent = map[string]string{
+	// The oracle compiles with -std=gnu89 (internal/oracle), where the
+	// decimal constant 2810079215, too large for a 32-bit long, is an
+	// unsigned long, so -2810079215 in expected_b[28] is 1484888081; cc/v4
+	// and the test follow C99, where it is a long long. clang reports the
+	// b >> 28 mismatch and aborts; our program passes. go-embedded-c/c#20.
+	"shiftdi-2.c": "C89 vs C99 type of a decimal constant",
+}
 
 // TestCorpusGCCTorture runs the generator over the gcc torture suite and
 // counts each file's fate: the same as clang, refused (by cause), or
@@ -71,10 +83,17 @@ func TestCorpusGCCTorture(t *testing.T) {
 			frontRefused++ // clang refuses it too
 			continue
 		}
-		if same(a, b) {
+		name := filepath.Base(p)
+		_, known := knownDifferent[name]
+		switch {
+		case same(a, b) && known:
+			t.Errorf("%s agrees with clang now: drop it from knownDifferent", name)
+		case same(a, b):
 			pass++
-		} else {
-			differ = append(differ, filepath.Base(p))
+		case known:
+			t.Logf("known difference: %s: %s", name, knownDifferent[name])
+		default:
+			differ = append(differ, name)
 		}
 	}
 	type kv struct {

@@ -83,7 +83,13 @@ type Segment struct {
 	Align  uint32
 	Offset uint32
 	Init   []byte
+	Relocs []Reloc // offsets into Init: addresses stored in the data
+	Flags  uint32  // segment info flags (SegStrings)
 }
+
+// SegStrings marks a segment holding only NUL-terminated strings, which
+// the linker may merge (Linking.md, segment info).
+const SegStrings = 1
 
 // RelocType is a relocation type (Linking.md, relocation sections).
 type RelocType byte
@@ -93,6 +99,7 @@ const (
 	RelocFunctionIndexLEB RelocType = 0
 	RelocMemoryAddrLEB    RelocType = 3
 	RelocMemoryAddrSLEB   RelocType = 4
+	RelocMemoryAddrI32    RelocType = 5
 	RelocGlobalIndexLEB   RelocType = 7
 )
 
@@ -117,12 +124,14 @@ type Reloc struct {
 // Object is a relocatable object: the sections of one translation unit.
 // Function indices count Imports first, then Funcs. Memory is imported as
 // env.__linear_memory, as clang's objects do, when Memory is set or there
-// are Segments.
+// are Segments. StackPointer imports env.__stack_pointer, a mutable i32
+// global of index 0 (BasicCABI.md, the linear stack).
 type Object struct {
-	Types    []FuncType
-	Imports  []Import
-	Memory   bool
-	Funcs    []Func
-	Segments []Segment
-	Symbols  []Symbol
+	Types        []FuncType
+	Imports      []Import
+	Memory       bool
+	StackPointer bool
+	Funcs        []Func
+	Segments     []Segment
+	Symbols      []Symbol
 }
