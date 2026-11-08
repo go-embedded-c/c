@@ -29,6 +29,9 @@ func (m *module) staticInit(in *cc.Initializer, seg *wasm.Segment) error {
 		}
 		return nil
 	}
+	if bitfieldLeaf(in) {
+		return unsupported(in, "bit-field initializer (W6)")
+	}
 	t, e, off := in.Type(), in.AssignmentExpression, in.Offset()
 	for i := range in.Len() {
 		at := off + i*t.Size()
@@ -40,6 +43,14 @@ func (m *module) staticInit(in *cc.Initializer, seg *wasm.Segment) error {
 		}
 	}
 	return nil
+}
+
+// bitfieldLeaf reports whether the initializer leaf in initializes a
+// bit-field: its bits share bytes with its neighbours, so a store of its
+// type would overwrite them (gcc torture 20230630-1.c).
+func bitfieldLeaf(in *cc.Initializer) bool {
+	f := in.Field()
+	return f != nil && f.IsBitfield()
 }
 
 // staticValue writes the value of e, of type t, at off in seg.
@@ -230,58 +241,6 @@ func (g *fgen) frameSlot(size int64, align int) int64 {
 	return off
 }
 
-// needsFrame reports whether a function needs a linear-stack frame: a
-// parameter or local whose address is taken, or a local array.
-func needsFrame(ft *cc.FunctionType, cs *cc.CompoundStatement) bool {
-	for _, p := range params(ft) {
-		if p.Declarator != nil && p.Declarator.AddressTaken() {
-			return true
-		}
-	}
-	var stmt func(s *cc.Statement) bool
-	var compound func(cs *cc.CompoundStatement) bool
-	decl := func(d *cc.Declaration) bool {
-		if d == nil || d.Case != cc.DeclarationDecl {
-			return false
-		}
-		for il := d.InitDeclaratorList; il != nil; il = il.InitDeclaratorList {
-			dr := il.InitDeclarator.Declarator
-			if dr.IsTypename() || dr.IsExtern() || dr.IsStatic() || dr.Type().Kind() == cc.Function {
-				continue
-			}
-			if _, ok := scalarOf(dr.Type()); !ok || dr.AddressTaken() {
-				return true
-			}
-		}
-		return false
-	}
-	compound = func(cs *cc.CompoundStatement) bool {
-		for _, bi := range items(cs) {
-			if bi.Case == cc.BlockItemDecl && decl(bi.Declaration) || bi.Case == cc.BlockItemStmt && stmt(bi.Statement) {
-				return true
-			}
-		}
-		return false
-	}
-	stmt = func(s *cc.Statement) bool {
-		if s == nil {
-			return false
-		}
-		switch s.Case {
-		case cc.StatementCompound:
-			return compound(s.CompoundStatement)
-		case cc.StatementSelection:
-			return stmt(s.SelectionStatement.Statement) || stmt(s.SelectionStatement.Statement2)
-		case cc.StatementIteration:
-			return decl(s.IterationStatement.Declaration) || stmt(s.IterationStatement.Statement)
-		case cc.StatementLabeled:
-			return stmt(s.LabeledStatement.Statement)
-		}
-		return false
-	}
-	return compound(cs)
-}
-
 // prologue returns the code that sets the frame up, to put before the
 // entry block: top = __stack_pointer; fp = top - size; __stack_pointer = fp;
 // then the address-taken parameters are copied to their slots.
@@ -362,6 +321,11 @@ func (g *fgen) addr(e cc.ExpressionNode) error {
 				g.slotAddress(off)
 				return nil
 			}
+			if i, ok := g.refs[d]; ok {
+				g.op(opLocalGet)
+				g.uleb(uint64(i))
+				return nil
+			}
 			if _, ok := g.vars[d]; ok {
 				return unsupported(x, "address of a register local")
 			}
@@ -381,6 +345,32 @@ func (g *fgen) addr(e cc.ExpressionNode) error {
 			return g.ptrValue(x.CastExpression)
 		}
 	case *cc.PostfixExpression:
+		switch x.Case {
+		case cc.PostfixExpressionSelect, cc.PostfixExpressionPSelect:
+			// E.m and E->m (C11 6.5.2.3): the member's offset from the
+			// address of the structure or union.
+			f := x.Field()
+			if f == nil {
+				return unsupported(x, "member")
+			}
+			if f.IsBitfield() {
+				return unsupported(x, "bit-field member (W6)")
+			}
+			var err error
+			if x.Case == cc.PostfixExpressionSelect {
+				err = g.aggAddr(x.PostfixExpression)
+			} else {
+				err = g.ptrValue(x.PostfixExpression)
+			}
+			if err != nil {
+				return err
+			}
+			if off := f.Offset(); off != 0 {
+				g.constant(off, intScalar)
+				g.op(opI32Add)
+			}
+			return nil
+		}
 		if x.Case == cc.PostfixExpressionIndex {
 			// E1[E2] is *(E1 + E2); either operand may be the pointer.
 			p, i := x.PostfixExpression, x.ExpressionList
@@ -400,6 +390,100 @@ func (g *fgen) addr(e cc.ExpressionNode) error {
 		}
 	}
 	return unsupported(e, "lvalue")
+}
+
+// aggAddr pushes the address of a structure or union value: an lvalue's
+// object, or a frame temporary holding the result of a call, an assignment,
+// E1 ? E2 : E3 or a comma expression.
+func (g *fgen) aggAddr(e cc.ExpressionNode) error {
+	if err := g.enter(e); err != nil {
+		return err
+	}
+	defer func() { g.depth-- }()
+	e = strip(e)
+	switch x := e.(type) {
+	case *cc.PostfixExpression:
+		if x.Case == cc.PostfixExpressionCall {
+			var slot int64
+			if err := g.callAgg(x, &slot); err != nil {
+				return err
+			}
+			g.slotAddress(slot)
+			return nil
+		}
+	case *cc.AssignmentExpression:
+		switch x.Case {
+		case cc.AssignmentExpressionCond:
+			return g.aggAddr(x.ConditionalExpression)
+		case cc.AssignmentExpressionAssign:
+			return g.aggAssign(x, true)
+		}
+		return unsupported(x, "assignment "+x.Case.String()+" of a structure")
+	case *cc.ConditionalExpression:
+		if x.Case == cc.ConditionalExpressionLOr {
+			break
+		}
+		if x.ExpressionList == nil {
+			return unsupported(x, "?: without a middle operand")
+		}
+		if err := g.condition(x.LogicalOrExpression); err != nil {
+			return err
+		}
+		g.op(opIf, byte(wasm.I32))
+		if err := g.aggAddr(x.ExpressionList); err != nil {
+			return err
+		}
+		g.op(opElse)
+		if err := g.aggAddr(x.ConditionalExpression); err != nil {
+			return err
+		}
+		g.op(opEnd)
+		return nil
+	case *cc.ExpressionList:
+		for l := x; l != nil; l = l.ExpressionList {
+			if l.ExpressionList == nil {
+				return g.aggAddr(l.AssignmentExpression)
+			}
+			if err := g.effect(l.AssignmentExpression); err != nil {
+				return err
+			}
+		}
+	}
+	return g.addr(e)
+}
+
+// aggAssign compiles E1 = E2 for structures and unions: E2 first, as for
+// scalars, then a copy of its bytes over E1's. With want, it leaves E1's
+// address.
+func (g *fgen) aggAssign(x *cc.AssignmentExpression, want bool) error {
+	t := x.UnaryExpression.Type()
+	if t.IsIncomplete() {
+		return unsupported(x, "assignment of an incomplete type")
+	}
+	if err := g.aggAddr(x.AssignmentExpression); err != nil {
+		return err
+	}
+	src := g.local(wasm.I32)
+	g.op(opLocalSet)
+	g.uleb(uint64(src))
+	if err := g.addr(x.UnaryExpression); err != nil {
+		return err
+	}
+	var dst uint32
+	if want {
+		dst = g.local(wasm.I32)
+		g.op(opLocalTee)
+		g.uleb(uint64(dst))
+	}
+	g.op(opLocalGet)
+	g.uleb(uint64(src))
+	g.constant(t.Size(), intScalar)
+	g.op(0xfc, 10, 0, 0) // memory.copy
+	if want {
+		g.op(opLocalGet)
+		g.uleb(uint64(dst))
+	}
+	return nil
 }
 
 // elemOf is the type a pointer or array type has elements of.
@@ -432,6 +516,9 @@ func designatesArray(e cc.ExpressionNode) bool {
 			return ok && d.Type().Kind() == cc.Array
 		}
 	case *cc.PostfixExpression:
+		if (x.Case == cc.PostfixExpressionSelect || x.Case == cc.PostfixExpressionPSelect) && x.Field() != nil {
+			return x.Field().Type().Kind() == cc.Array
+		}
 		if x.Case == cc.PostfixExpressionIndex {
 			p := x.PostfixExpression
 			if !isPtrOrArray(p.Type()) {
@@ -547,6 +634,9 @@ func (g *fgen) localInit(in *cc.Initializer, slot int64) error {
 		}
 		return nil
 	}
+	if bitfieldLeaf(in) {
+		return unsupported(in, "bit-field initializer (W6)")
+	}
 	t, e := in.Type(), in.AssignmentExpression
 	for i := range in.Len() {
 		at := slot + in.Offset() + i*t.Size()
@@ -561,6 +651,16 @@ func (g *fgen) localInit(in *cc.Initializer, slot int64) error {
 				return err
 			}
 			g.constant(min(t.Size(), literalSize(cc.StringValue(v))), intScalar)
+			g.op(0xfc, 10, 0, 0) // memory.copy
+			continue
+		}
+		if isAggregate(t) {
+			// struct S b = a: a copy of the value's bytes.
+			g.slotAddress(at)
+			if err := g.aggAddr(e); err != nil {
+				return err
+			}
+			g.constant(t.Size(), intScalar)
 			g.op(0xfc, 10, 0, 0) // memory.copy
 			continue
 		}

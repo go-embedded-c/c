@@ -55,6 +55,8 @@ type fgen struct {
 	frameSize int64
 	slots     map[*cc.Declarator]int64 // objects in the frame, by offset
 	spilled   []spilledParam
+	refs      map[*cc.Declarator]uint32 // parameters passed by address: the local holding it
+	sig       sig                       // the function's lowered signature
 }
 
 func (g *fgen) op(b ...byte) { g.cur.code = append(g.cur.code, b...) }
@@ -109,27 +111,52 @@ func (m *module) function(fd *cc.FunctionDefinition) error {
 	if !ok || f == nil {
 		return unsupported(d, "function definition of type "+typeName(d.Type()))
 	}
-	g := &fgen{m: m, fn: f.pos, vars: map[*cc.Declarator]uint32{}, void: isVoid(ft.Result()),
-		cases: map[*cc.LabeledStatement]*block{}, slots: map[*cc.Declarator]int64{}}
+	g := &fgen{m: m, fn: f.pos, vars: map[*cc.Declarator]uint32{}, void: f.result == nil, sig: f.sig,
+		cases: map[*cc.LabeledStatement]*block{}, slots: map[*cc.Declarator]int64{}, refs: map[*cc.Declarator]uint32{}}
 	if !g.void {
-		g.result, _ = scalarOf(ft.Result()) // signature checked it
+		g.result = *f.result
 	}
-	g.nparams = uint32(len(params(ft)))
-	if g.frame = needsFrame(ft, fd.CompoundStatement); g.frame {
-		g.fp, g.top = g.local(wasm.I32), g.local(wasm.I32)
+	// The wasm parameters: the sret pointer first, then each parameter
+	// that is passed at all.
+	var idx uint32
+	if f.sret != nil {
+		idx++
 	}
+	for _, p := range f.params {
+		if p.pass != passIgnored {
+			g.nparams++
+		}
+	}
+	g.nparams += idx
+	// Every function has a frame on the linear stack: objects whose address
+	// is taken, arrays, aggregates, and the temporaries of calls live in it.
+	g.frame = true
+	g.fp, g.top = g.local(wasm.I32), g.local(wasm.I32)
 	for i, p := range params(ft) {
-		if p.Declarator == nil {
+		dp := p.Declarator
+		if dp == nil {
 			return unsupported(d, "unnamed parameter")
 		}
-		if p.Declarator.AddressTaken() {
-			s := f.params[i]
-			slot := g.frameSlot(int64(s.bits/8), s.bits/8)
-			g.slots[p.Declarator] = slot
-			g.spilled = append(g.spilled, spilledParam{param: uint32(i), slot: slot, s: s})
-			continue
+		cp := f.params[i]
+		switch cp.pass {
+		case passIgnored:
+			g.slots[dp] = g.frameSlot(0, 1)
+		case passIndirect:
+			// The caller passed the address of its copy: the parameter is
+			// that object.
+			g.refs[dp] = idx
+			idx++
+		default:
+			if isAggregate(cp.t) || dp.AddressTaken() {
+				size := max(cp.t.Size(), int64(cp.s.bits/8))
+				slot := g.frameSlot(size, max(cp.t.Align(), cp.s.bits/8))
+				g.slots[dp] = slot
+				g.spilled = append(g.spilled, spilledParam{param: idx, slot: slot, s: cp.s})
+			} else {
+				g.vars[dp] = idx
+			}
+			idx++
 		}
-		g.vars[p.Declarator] = uint32(i)
 	}
 	g.cur = g.newBlock()
 	// The size expressions of a parameter declared as an array (int
@@ -282,6 +309,38 @@ func (g *fgen) statement(s *cc.Statement) error {
 func (g *fgen) jumpStatement(j *cc.JumpStatement) error {
 	switch j.Case {
 	case cc.JumpStatementReturn:
+		if e := j.ExpressionList; e != nil && isAggregate(g.sig.rtype) && isAggregate(e.Type()) {
+			// A structure or union result (BasicCABI.md): copied to the
+			// caller's memory, whose address is parameter 0, or loaded as
+			// a singleton's scalar.
+			switch {
+			case g.sig.sret != nil:
+				g.op(opLocalGet, 0)
+				if err := g.aggAddr(e); err != nil {
+					return err
+				}
+				g.constant(g.sig.sret.Size(), intScalar)
+				g.op(0xfc, 10, 0, 0) // memory.copy
+			case g.sig.result != nil:
+				if err := g.aggAddr(e); err != nil {
+					return err
+				}
+				op, align := g.result.load()
+				g.memarg(op, align)
+				g.epilogue()
+				g.op(opReturn)
+				g.cur.term = termReturn
+				g.dead()
+				return nil
+			default:
+				if err := g.effect(e); err != nil {
+					return err
+				}
+			}
+			g.ret()
+			g.dead()
+			return nil
+		}
 		if j.ExpressionList != nil {
 			if g.void {
 				if err := g.effect(j.ExpressionList); err != nil {

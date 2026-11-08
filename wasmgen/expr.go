@@ -325,10 +325,10 @@ func (g *fgen) rvalue(e cc.ExpressionNode) (scalar, error) {
 			return s, g.call(x)
 		case cc.PostfixExpressionInc, cc.PostfixExpressionDec:
 			return s, g.incdec(x, x.PostfixExpression, x.Case == cc.PostfixExpressionInc, true, true)
-		case cc.PostfixExpressionIndex:
+		case cc.PostfixExpressionIndex, cc.PostfixExpressionSelect, cc.PostfixExpressionPSelect:
 			return s, g.load(x)
 		}
-		return s, unsupported(x, "postfix "+x.Case.String()+" (W4b)")
+		return s, unsupported(x, "postfix "+x.Case.String())
 	}
 	return s, unsupported(e, "expression")
 }
@@ -488,7 +488,7 @@ func (g *fgen) effect(e cc.ExpressionNode) error {
 		case cc.PostfixExpressionInc, cc.PostfixExpressionDec:
 			return g.incdec(x, x.PostfixExpression, x.Case == cc.PostfixExpressionInc, true, false)
 		case cc.PostfixExpressionCall:
-			if isVoid(x.Type()) {
+			if isVoid(x.Type()) || isAggregate(x.Type()) {
 				return g.call(x)
 			}
 			if err := g.call(x); err != nil {
@@ -550,6 +550,13 @@ func (g *fgen) effect(e cc.ExpressionNode) error {
 		}
 	}
 	if e.Pure() {
+		return nil
+	}
+	if isAggregate(e.Type()) {
+		if err := g.aggAddr(e); err != nil {
+			return err
+		}
+		g.op(opDrop)
 		return nil
 	}
 	if _, err := g.rvalue(e); err != nil {
@@ -679,6 +686,11 @@ var binaryOps = map[cc.AssignmentExpressionCase][2]byte{ // signed, unsigned
 // E1's address and value, which a call in E2 can observe (gcc torture
 // pr58943.c: x[0] |= foo(), where foo changes x[0]).
 func (g *fgen) assign(x *cc.AssignmentExpression, want bool) error {
+	if isAggregate(x.UnaryExpression.Type()) {
+		// Only effect gets here with a structure: rvalue refuses its type,
+		// aggAddr takes the value, and cc/v4 refuses op= on structures.
+		return g.aggAssign(x, false)
+	}
 	t, err := g.lvalue(x.UnaryExpression)
 	if err != nil {
 		return err
@@ -815,8 +827,13 @@ func (g *fgen) incdec(n, e cc.ExpressionNode, inc, post, want bool) error {
 	return nil
 }
 
-// call compiles a direct call (C11 6.5.2.2).
-func (g *fgen) call(x *cc.PostfixExpression) error {
+// call compiles a direct call (C11 6.5.2.2) whose result, if any, is
+// scalar; an aggregate result is discarded.
+func (g *fgen) call(x *cc.PostfixExpression) error { return g.callAgg(x, nil) }
+
+// callAgg compiles a direct call. With slot non-nil, the call's aggregate
+// result is left in the frame at *slot.
+func (g *fgen) callAgg(x *cc.PostfixExpression, slot *int64) error {
 	callee := x.PostfixExpression
 	for {
 		if p, ok := callee.(*cc.PrimaryExpression); ok && p.Case == cc.PrimaryExpressionExpr {
@@ -851,16 +868,65 @@ func (g *fgen) call(x *cc.PostfixExpression) error {
 	if len(f.params) != len(args) {
 		return unsupported(x, "call with a different number of arguments than parameters")
 	}
+	var result int64
+	if f.sret != nil {
+		// The caller provides the result's memory, its address first.
+		result = g.frameSlot(f.sret.Size(), f.sret.Align())
+		g.slotAddress(result)
+	}
 	for i, a := range args {
-		from, err := g.rvalue(a)
-		if err != nil {
-			return err
+		p := f.params[i]
+		switch {
+		case p.pass == passIgnored:
+			if err := g.effect(a); err != nil {
+				return err
+			}
+		case p.pass == passIndirect:
+			// A copy the callee may change (BasicCABI.md).
+			tmp := g.frameSlot(p.t.Size(), p.t.Align())
+			g.slotAddress(tmp)
+			if err := g.aggAddr(a); err != nil {
+				return err
+			}
+			g.constant(p.t.Size(), intScalar)
+			g.op(0xfc, 10, 0, 0) // memory.copy
+			g.slotAddress(tmp)
+		case isAggregate(p.t):
+			// A singleton: its one scalar, loaded.
+			if err := g.aggAddr(a); err != nil {
+				return err
+			}
+			op, align := p.s.load()
+			g.memarg(op, align)
+		default:
+			from, err := g.rvalue(a)
+			if err != nil {
+				return err
+			}
+			g.convert(from, p.s)
 		}
-		g.convert(from, f.params[i])
 	}
 	g.op(opCall)
 	g.cur.calls = append(g.cur.calls, callSite{offset: uint32(len(g.cur.code)), callee: f})
 	g.reloc(wasm.RelocFunctionIndexLEB, f.sym)
+	if isAggregate(f.rtype) {
+		if f.result != nil {
+			// A singleton result: store it to memory, to give it an address.
+			v := g.local(f.result.vt)
+			g.op(opLocalSet)
+			g.uleb(uint64(v))
+			result = g.frameSlot(f.rtype.Size(), f.rtype.Align())
+			g.slotAddress(result)
+			g.op(opLocalGet)
+			g.uleb(uint64(v))
+			op, align := f.result.store()
+			g.memarg(op, align)
+		}
+		if slot != nil {
+			*slot = result
+		}
+		return nil
+	}
 	switch want := x.Type(); {
 	case f.result == nil && !isVoid(want):
 		// An implicit `int abort()` used for its value: the library
@@ -950,7 +1016,7 @@ func (g *fgen) calleeFor(n cc.Node, d *cc.Declarator) (*funcSym, error) {
 		return f, nil
 	}
 	if ps, ok := libc[name]; ok {
-		return g.m.importFunc(name, ps, nil), nil
+		return g.m.importFunc(name, scalarSig(ps, nil)), nil
 	}
 	return g.m.callee(n, d)
 }
