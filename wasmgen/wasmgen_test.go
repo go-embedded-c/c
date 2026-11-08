@@ -292,6 +292,9 @@ func TestAgainstClang(t *testing.T) {
 		"char a[3][2][5] = {{\"ab\", \"cd\"}, {\"ef\", \"gh\"}}; char (*p)[5] = &a[1][1]; char *q = a[1][1]; char (*r)[5] = &a[0][1];\nint main(void) { return (*p)[1] * 1000 + q[0] + (*r)[1] * 1000000; }",
 		// calls without a prototype, with more or fewer arguments (920501-1.c)
 		"int s[2]; int calls;\nx(){if(!s[0]){s[1+s[1]]=s[1];return 1;}}\ny(a, b) int a, b; { return a * 10 + b; }\nint t(int v) { calls++; return v; }\nmain(){s[0]=s[1]=0;if(x(t(0), t(1))!=1)abort();return calls * 100 + y(4, 2);}",
+		// compound literals (20000722-1.c, 20010123-1.c), in a function and
+		// at file scope
+		"struct s { char *p; int t; }; int calls;\nvoid foo(struct s *p) { calls = calls * 10 + p->t; p->t = 2; }\nvoid bar(void) { foo(&(struct s){\"hi\", 1}); }\nstruct s *gp = &(struct s){\"gl\", 7}; int *ga = (int[3]){4, 5, 6};\nint main(void) { int i, k = 0; bar(); bar(); for (i = 0; i < 3; i++) { int *q = (int[2]){i, i * 2}; struct s *t = &(struct s){.t = 3}; k = k * 10 + q[1] + t->t + (t->p == 0); t->t = 9; t->p = \"x\"; } return calls + k * 100 + gp->t * 1000000 + ga[2] * 10000000 + (int){3} + gp->p[1] + ((struct s){0, 8}).t; }",
 		// library functions called without a declaration (cc/v4 resolves
 		// them to its builtins)
 		"int main() { char b[16], *p; memset(b, 'x', 15); b[15] = 0; memcpy(b + 2, \"abc\", 3); p = malloc(8); strcpy(p, \"hey\"); strcat(p, \"!\"); puts(b); printf(\"%d %d %d %s %d %d\\n\", (int)strlen(b), strcmp(p, \"hey!\"), memcmp(b, \"xxab\", 4) < 0, strchr(b, 'c'), (int)strspn(b, \"x\"), strncmp(p, \"he\", 2)); free(p); putchar('\\n'); return __builtin_strlen(\"four\"); }",

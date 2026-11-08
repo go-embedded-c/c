@@ -63,6 +63,8 @@ type module struct {
 	localNames map[string]bool
 	// layouts: whether cc/v4's layout of a type agrees with clang's.
 	layouts map[cc.Type]bool
+	// File-scope compound literals.
+	complits map[*cc.PostfixExpression]*dataSym
 	// String literal symbols by contents.
 	strings map[string]uint32
 	sp      uint32 // the __stack_pointer symbol, when imported
@@ -199,7 +201,8 @@ func CompileLimits(ast *cc.AST, file string, lim Limits) (obj []byte, err error)
 		}
 	}()
 	m := &module{o: &wasm.Object{}, lim: lim.withDefaults(), types: map[string]uint32{}, funcs: map[string]*funcSym{}, data: map[string]*dataSym{}, strings: map[string]uint32{},
-		locals: map[*cc.Declarator]*dataSym{}, localNames: map[string]bool{}, layouts: map[cc.Type]bool{}}
+		locals: map[*cc.Declarator]*dataSym{}, localNames: map[string]bool{}, layouts: map[cc.Type]bool{},
+		complits: map[*cc.PostfixExpression]*dataSym{}}
 	var defs []*cc.FunctionDefinition
 	for l := ast.TranslationUnit; l != nil; l = l.TranslationUnit {
 		ed := l.ExternalDeclaration
@@ -547,7 +550,7 @@ func (m *module) finish() {
 	for _, c := range m.calls {
 		wasm.PutPaddedULEB(m.o.Funcs[c.fn].Body[c.offset:], index(c.callee))
 	}
-	m.o.Memory = len(m.data) != 0 || len(m.strings) != 0 || len(m.locals) != 0 || m.o.StackPointer
+	m.o.Memory = len(m.data) != 0 || len(m.strings) != 0 || len(m.locals) != 0 || len(m.complits) != 0 || m.o.StackPointer
 }
 
 // stackPointer returns the symbol of env.__stack_pointer, importing it.
