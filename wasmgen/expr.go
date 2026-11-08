@@ -1142,5 +1142,14 @@ func (g *fgen) calleeFor(n cc.Node, d *cc.Declarator) (*funcSym, error) {
 // has the signature of wasi-libc's definition, so that an undeclared call
 // goes to the library, as clang's does.
 var libcAsDeclared = map[string]bool{
-	"printf": true, // int printf(const char *, ...)
+	// internal/cc/cc.go declares each with the C standard's prototype,
+	// which is wasi-libc's (size_t is __SIZE_TYPE__, unsigned long, i32).
+	// clang may expand a memcpy or memset of constant size inline; the
+	// call has the same effect.
+	"printf": true, "puts": true, "putchar": true,
+	"malloc": true, "free": true,
+	"memcpy": true, "memset": true, "memcmp": true, "memchr": true,
+	"strlen": true, "strcmp": true, "strncmp": true, "strcpy": true, "strncpy": true,
+	"strcat": true, "strncat": true, "strchr": true, "strrchr": true, "strstr": true,
+	"strpbrk": true, "strspn": true, "strcspn": true,
 }

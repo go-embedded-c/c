@@ -292,6 +292,9 @@ func TestAgainstClang(t *testing.T) {
 		"char a[3][2][5] = {{\"ab\", \"cd\"}, {\"ef\", \"gh\"}}; char (*p)[5] = &a[1][1]; char *q = a[1][1]; char (*r)[5] = &a[0][1];\nint main(void) { return (*p)[1] * 1000 + q[0] + (*r)[1] * 1000000; }",
 		// calls without a prototype, with more or fewer arguments (920501-1.c)
 		"int s[2]; int calls;\nx(){if(!s[0]){s[1+s[1]]=s[1];return 1;}}\ny(a, b) int a, b; { return a * 10 + b; }\nint t(int v) { calls++; return v; }\nmain(){s[0]=s[1]=0;if(x(t(0), t(1))!=1)abort();return calls * 100 + y(4, 2);}",
+		// library functions called without a declaration (cc/v4 resolves
+		// them to its builtins)
+		"int main() { char b[16], *p; memset(b, 'x', 15); b[15] = 0; memcpy(b + 2, \"abc\", 3); p = malloc(8); strcpy(p, \"hey\"); strcat(p, \"!\"); puts(b); printf(\"%d %d %d %s %d %d\\n\", (int)strlen(b), strcmp(p, \"hey!\"), memcmp(b, \"xxab\", 4) < 0, strchr(b, 'c'), (int)strspn(b, \"x\"), strncmp(p, \"he\", 2)); free(p); putchar('\\n'); return __builtin_strlen(\"four\"); }",
 		// W6: bit-fields, with the bytes of the objects printed so that the
 		// layout shows
 		"#include <stdio.h>\nstruct S { unsigned a:3; int b:5; unsigned c:1; signed char d:4; long long e:40; unsigned long long f:44; _Bool g:1; int h:16; int i:7; };\nstruct S gs = {5, -3, 1, -8, -123456789012LL, 0xabcdef12345ULL, 1, -2, 63};\nvoid dump(void *o, int n) { unsigned char *p = o; while (n--) printf(\"%02x\", *p++); printf(\"\\n\"); }\nint main(void) {\n int x = 2; struct S s = {1, x, 0, 3, 4, 5, 0, 6, 7};\n s.a += 6; s.b = s.b * 9; s.c++; s.d -= 9; s.e <<= 3; s.f = -1; s.g = 5; s.i = (s.h = 300) + 100;\n int v = (s.b = 100), w = s.c--;\n printf(\"%u %d %u %d %lld %llx %d %d %d %d %d\\n\", s.a, s.b, s.c, s.d, s.e, s.f, s.g, s.h, s.i, v, w);\n dump(&s, sizeof s);\n printf(\"%u %d %u %d %lld %llx %d %d %d %d\\n\", gs.a, gs.b, gs.c, gs.d, gs.e, gs.f, gs.g, gs.h, gs.i, (int)sizeof gs);\n dump(&gs, sizeof gs);\n return 0;\n}",
