@@ -46,16 +46,8 @@ func (g *fgen) varargs(args []cc.ExpressionNode) error {
 			if pass == passIndirect {
 				v.s = scalar{vt: wasm.I32, bits: 32, ptr: true}
 			}
-		case v.t.Kind() == cc.Array || designatesArray(a):
-			v.s, _ = scalarOf(v.t.Decay())
 		default:
-			// The default argument promotions: integer promotion for the
-			// integer types (float to double comes with W5).
-			t := v.t
-			if cc.IsIntegerType(t) {
-				t = cc.IntegerPromotion(t)
-			}
-			s, ok := scalarOf(t)
+			s, ok := promoted(a)
 			if !ok {
 				return unsupported(a, "variadic argument of type "+typeName(v.t))
 			}
@@ -105,6 +97,25 @@ func (g *fgen) varargs(args []cc.ExpressionNode) error {
 	}
 	g.slotAddress(buf)
 	return nil
+}
+
+// unprototyped reports whether ft is declared without a prototype, `f()`:
+// cc/v4 gives it no parameters and no maximum, without `...`.
+func unprototyped(ft *cc.FunctionType) bool {
+	return !ft.IsVariadic() && ft.MaxArgs() < 0
+}
+
+// promoted returns the representation of e after the default argument
+// promotions (C11 6.5.2.2p6), for a scalar; floats come with W5.
+func promoted(e cc.ExpressionNode) (scalar, bool) {
+	t := e.Type()
+	if t.Kind() == cc.Array || designatesArray(e) {
+		return scalarOf(t.Decay())
+	}
+	if cc.IsIntegerType(t) {
+		t = cc.IntegerPromotion(t)
+	}
+	return scalarOf(t)
 }
 
 // vaIntrinsic compiles __builtin_va_start and __builtin_va_end, which

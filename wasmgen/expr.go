@@ -868,6 +868,19 @@ func (g *fgen) callAgg(x *cc.PostfixExpression, slot *int64) error {
 	if err != nil {
 		return err
 	}
+	var extra []cc.ExpressionNode // evaluated for their effects only
+	if ft, ok := d.Type().(*cc.FunctionType); ok && unprototyped(ft) && len(f.params) == 0 && len(args) > 0 {
+		// `x(){…}` called as x(0): C leaves it undefined; clang calls a
+		// wrapper that drops the extra arguments (WebAssemblyFixFunction-
+		// Bitcasts.cpp, createWrapper). cc/v4 gives a K&R definition
+		// `f(a) int a;` its parameters, so only `()` gets here. For a
+		// function of another unit, the call's arguments are its signature,
+		// which is not done yet.
+		if !f.defined {
+			return unsupported(x, "call with arguments of a function declared without them in another unit")
+		}
+		args, extra = nil, args
+	}
 	if len(args) < len(f.params) || !f.variadic && len(args) != len(f.params) {
 		return unsupported(x, "call with a different number of arguments than parameters")
 	}
@@ -911,6 +924,11 @@ func (g *fgen) callAgg(x *cc.PostfixExpression, slot *int64) error {
 	}
 	if f.variadic {
 		if err := g.varargs(args[len(f.params):]); err != nil {
+			return err
+		}
+	}
+	for _, a := range extra {
+		if err := g.effect(a); err != nil {
 			return err
 		}
 	}
@@ -1020,6 +1038,10 @@ func (g *fgen) calleeFor(n cc.Node, d *cc.Declarator) (*funcSym, error) {
 			return nil, unsupported(n, "builtin "+name)
 		}
 		name = lib
+	} else if strings.HasPrefix(name, "__builtin_") {
+		// A builtin cc/v4 does not declare (__builtin_return_address) is
+		// implicitly `int f()`; it is an intrinsic, not a library call.
+		return nil, unsupported(n, "builtin "+name)
 	}
 	if f := g.m.funcs[name]; f != nil {
 		return f, nil

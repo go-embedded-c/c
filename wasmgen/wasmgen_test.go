@@ -52,6 +52,8 @@ func TestUnsupported(t *testing.T) {
 		{"int f(void); int (*fp)(void) = f; int main(void) { return 0; }", "address of a function (W4c)"},
 		{"int f(int n) { int a[n]; return 0; } int main(void) { return f(2); }", "variable-length array"},
 		{"int main(void) { return __builtin_clz(1); }", "builtin __builtin_clz"},
+		{"int main(void) { return (int)__builtin_return_address(0); }", "builtin __builtin_return_address"},
+		{"int f(); int main(void) { return f(1); }", "call with arguments of a function declared without them in another unit"},
 	} {
 		_, err := compile(t, f, tc.src)
 		var u *wasmgen.Unsupported
@@ -283,6 +285,8 @@ func TestAgainstClang(t *testing.T) {
 		// pointers to arrays, which cc/v4 types already decayed (strlen-4.c)
 		"typedef char A5[5]; typedef A5 A2[2]; A2 a[2] = {{\"ab\", \"cd\"}, {\"ef\", \"gh\"}};\nint main(void) { return (*(&a[0][0] + 1))[1] * 100000 + (*&a[1][1])[1] * 1000 + ((char *)(&a[0][0] + 1) - (char *)a) * 10 + (int)sizeof(*&a[0][0]); }",
 		"char a[3][2][5] = {{\"ab\", \"cd\"}, {\"ef\", \"gh\"}}; char (*p)[5] = &a[1][1]; char *q = a[1][1]; char (*r)[5] = &a[0][1];\nint main(void) { return (*p)[1] * 1000 + q[0] + (*r)[1] * 1000000; }",
+		// calls without a prototype, with more or fewer arguments (920501-1.c)
+		"int s[2]; int calls;\nx(){if(!s[0]){s[1+s[1]]=s[1];return 1;}}\ny(a, b) int a, b; { return a * 10 + b; }\nint t(int v) { calls++; return v; }\nmain(){s[0]=s[1]=0;if(x(t(0), t(1))!=1)abort();return calls * 100 + y(4, 2);}",
 		// W4c: variadic functions
 		"#include <stdarg.h>\nint sum(int n, ...) { va_list ap; int t = 0; va_start(ap, n); while (n--) t += va_arg(ap, int); va_end(ap); return t; }\nint main(void) { return sum(4, 1, 2, 3, 40) * 10 + sum(0); }",
 		"#include <stdarg.h>\nint vsum(int n, va_list ap) { int t = 0; while (n--) t = t * 10 + va_arg(ap, int); return t; }\nint two(int n, ...) { va_list ap, aq; int a, b; va_start(ap, n); va_copy(aq, ap); a = vsum(n, ap); b = vsum(n, aq); va_end(aq); va_end(ap); return a + b * 1000; }\nint main(void) { return two(3, 1, 2, 3); }",
