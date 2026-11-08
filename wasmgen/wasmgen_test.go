@@ -35,11 +35,11 @@ func TestUnsupported(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ src, what string }{
-		{"int main(int c, char **v) { return 0; }", "main with parameters"},
+		{"int main(int c, char **v, char **e) { return 0; }", "main with parameters other than (int, char **)"},
+		{"int main(void) { return __func__[0]; }", "static local __func__"},
 		{"int main(void) { goto l; l: return 0; }", "jump JumpStatementGoto (W7)"},
 		{"int main(void) { int x = 1; switch (x) { case 1 ... 3: return 1; } return 0; }", "case range"},
 		{"int main(void) { int x = 1; return x ?: 2; }", "?: without a middle operand"},
-		{"int main(void) { static int n; return n; }", "static local"},
 		{"double d; int main(void) { return 0; }", "file-scope object of type double"},
 		{"int g(int, ...); int main(void) { return g(1, 2.0); }", "variadic argument of type double"},
 		{"void f(int n) { struct S { int i[n]; int k; } s; } int main(void) { f(1); return 0; }", "local of type struct S {i array of int; k int}"},
@@ -287,6 +287,15 @@ func TestAgainstClang(t *testing.T) {
 		"char a[3][2][5] = {{\"ab\", \"cd\"}, {\"ef\", \"gh\"}}; char (*p)[5] = &a[1][1]; char *q = a[1][1]; char (*r)[5] = &a[0][1];\nint main(void) { return (*p)[1] * 1000 + q[0] + (*r)[1] * 1000000; }",
 		// calls without a prototype, with more or fewer arguments (920501-1.c)
 		"int s[2]; int calls;\nx(){if(!s[0]){s[1+s[1]]=s[1];return 1;}}\ny(a, b) int a, b; { return a * 10 + b; }\nint t(int v) { calls++; return v; }\nmain(){s[0]=s[1]=0;if(x(t(0), t(1))!=1)abort();return calls * 100 + y(4, 2);}",
+		// W4d: static locals, main(argc, argv)
+		"int next(void) { static int n = 40; static int *p = &n; return (*p)++; }\nint other(void) { static int n; return n++; }\nint main(void) { int a = next(), b = next(), c = other(); { static char s[] = \"xy\"; s[0]++; c += s[0]; } return a * 1000 + b * 10 + c + other() * 100000; }",
+		"struct S { int a; long long b; }; struct S *get(void) { static struct S s = {1, 2}; s.a++; return &s; }\nint main(void) { get(); return get()->a * 10 + (int)get()->b; }",
+		// a string literal added while a static initializer is written
+		// moved the segments under it (pr53084.c)
+		"int main(void) { static const char *const q[] = {\"foo\" + 1, \"x\"}; static const char *p = \"baz\"; return q[0][0] * 1000 + q[1][0] + p[2] * 100000; }",
+		"int x; const char *p; const char *p = \"bar\" + 1; int main(void) { return p[0]; }",
+		"int main(int argc, char **argv) { return argc * 100 + (argv[1] == 0) * 10 + (argv[0][0] != 0); }",
+		"int main(int argc, char *argv[]) { if (argc > 1) return main(argc - 1, argv) + 1; return 40; }",
 		// W4c: variadic functions
 		"#include <stdarg.h>\nint sum(int n, ...) { va_list ap; int t = 0; va_start(ap, n); while (n--) t += va_arg(ap, int); va_end(ap); return t; }\nint main(void) { return sum(4, 1, 2, 3, 40) * 10 + sum(0); }",
 		"#include <stdarg.h>\nint vsum(int n, va_list ap) { int t = 0; while (n--) t = t * 10 + va_arg(ap, int); return t; }\nint two(int n, ...) { va_list ap, aq; int a, b; va_start(ap, n); va_copy(aq, ap); a = vsum(n, ap); b = vsum(n, aq); va_end(aq); va_end(ap); return a + b * 1000; }\nint main(void) { return two(3, 1, 2, 3); }",

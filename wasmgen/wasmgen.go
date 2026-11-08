@@ -58,6 +58,9 @@ type module struct {
 	funcs map[string]*funcSym
 	// Data symbols by name (file scope objects).
 	data map[string]*dataSym
+	// Static locals by declarator, and the names their symbols took.
+	locals     map[*cc.Declarator]*dataSym
+	localNames map[string]bool
 	// String literal symbols by contents.
 	strings map[string]uint32
 	sp      uint32 // the __stack_pointer symbol, when imported
@@ -193,7 +196,8 @@ func CompileLimits(ast *cc.AST, file string, lim Limits) (obj []byte, err error)
 			obj, err = nil, &InternalError{Value: r}
 		}
 	}()
-	m := &module{o: &wasm.Object{}, lim: lim.withDefaults(), types: map[string]uint32{}, funcs: map[string]*funcSym{}, data: map[string]*dataSym{}, strings: map[string]uint32{}}
+	m := &module{o: &wasm.Object{}, lim: lim.withDefaults(), types: map[string]uint32{}, funcs: map[string]*funcSym{}, data: map[string]*dataSym{}, strings: map[string]uint32{},
+		locals: map[*cc.Declarator]*dataSym{}, localNames: map[string]bool{}}
 	var defs []*cc.FunctionDefinition
 	for l := ast.TranslationUnit; l != nil; l = l.TranslationUnit {
 		ed := l.ExternalDeclaration
@@ -273,14 +277,21 @@ func (m *module) declareFunction(fd *cc.FunctionDefinition) error {
 	if f := m.funcs[name]; f != nil && f.defined {
 		return unsupported(d, "function defined twice")
 	}
+	symName := name
 	if name == "main" && len(sg.params) != 0 {
-		return unsupported(d, "main with parameters")
+		// int main(int argc, char *argv[]) is the symbol __main_argc_argv
+		// (BasicCABI.md, "User entrypoint"), and clang emits no `main`:
+		// wasi-libc's __main_void calls it with the arguments.
+		if len(sg.params) != 2 || sg.variadic || sg.params[0].s.vt != wasm.I32 || sg.params[0].s.ptr || !sg.params[1].s.ptr {
+			return unsupported(d, "main with parameters other than (int, char **)")
+		}
+		symName = "__main_argc_argv"
 	}
 	m.o.Funcs = append(m.o.Funcs, wasm.Func{Type: m.wasmType(sg)})
 	f := &funcSym{defined: true, pos: len(m.o.Funcs) - 1, sig: sg}
-	f.sym = m.symbol(wasm.Symbol{Kind: wasm.SymFunction, Flags: linkFlags(d), Name: name})
+	f.sym = m.symbol(wasm.Symbol{Kind: wasm.SymFunction, Flags: linkFlags(d), Name: symName})
 	m.funcs[name] = f
-	if name == "main" {
+	if symName == "main" {
 		// wasi-libc's crt1.o calls __main_void for a main that takes no
 		// arguments; clang defines it on the same function.
 		alias := *f
@@ -365,7 +376,7 @@ func (m *module) object(d *cc.Declarator, id *cc.InitDeclarator) error {
 			seg := &m.o.Segments[prev.seg]
 			clear(seg.Init)
 			seg.Relocs, seg.Name = nil, ".data."+name
-			return m.staticInit(id.Initializer, seg)
+			return m.initSegment(prev.seg, id.Initializer)
 		}
 		return nil // another tentative definition
 	}
@@ -448,6 +459,56 @@ func alignLog2(n int) uint32 {
 	return l
 }
 
+// staticLocal defines a block-scope object with static storage duration
+// (C11 6.2.4p3) in its own segment, with a local symbol named as clang
+// names it, fn.name (fn.name.1, … for another one of the same name). The
+// symbol exists before the initialiser runs, which may take its address.
+func (m *module) staticLocal(fn string, d *cc.Declarator, id *cc.InitDeclarator) error {
+	if _, ok := m.locals[d]; ok {
+		return nil
+	}
+	t := d.Type()
+	size, err := objectSize(d, id)
+	if err != nil {
+		return err
+	}
+	if size > maxObject {
+		return unsupported(d, "static local larger than the limit")
+	}
+	if !storable(t) {
+		return unsupported(d, "static local of type "+typeName(t))
+	}
+	name := fn + "." + d.Name()
+	for i := 1; m.localNames[name]; i++ {
+		name = fmt.Sprintf("%s.%s.%d", fn, d.Name(), i)
+	}
+	m.localNames[name] = true
+	seg := wasm.Segment{Name: ".bss." + name, Align: alignLog2(max(t.Align(), d.Alignas(), 1)), Init: make([]byte, size)}
+	if id.Case == cc.InitDeclaratorInit {
+		seg.Name = ".data." + name
+	}
+	idx := m.addSegment(seg)
+	ds := &dataSym{defined: true, seg: idx}
+	ds.sym = m.symbol(wasm.Symbol{Kind: wasm.SymData, Flags: wasm.SymBindingLocal, Name: name, Index: uint32(idx), Size: uint32(size)})
+	m.locals[d] = ds
+	if id.Case == cc.InitDeclaratorInit {
+		return m.initSegment(idx, id.Initializer)
+	}
+	return nil
+}
+
+// initSegment runs staticInit on segment idx. It works on a copy written
+// back by index: a string literal in the initialiser appends a segment,
+// which may move m.o.Segments, and a pointer into it would then write the
+// relocations to the old array (the static `{"foo" + 1}` of pr53084.c
+// read 0).
+func (m *module) initSegment(idx int, in *cc.Initializer) error {
+	seg := m.o.Segments[idx]
+	err := m.staticInit(in, &seg)
+	m.o.Segments[idx] = seg
+	return err
+}
+
 // global returns the data symbol of the file-scope object declared by d,
 // an undefined symbol when it is defined elsewhere.
 func (m *module) global(n cc.Node, d *cc.Declarator) (*dataSym, error) {
@@ -478,7 +539,7 @@ func (m *module) finish() {
 	for _, c := range m.calls {
 		wasm.PutPaddedULEB(m.o.Funcs[c.fn].Body[c.offset:], index(c.callee))
 	}
-	m.o.Memory = len(m.data) != 0 || len(m.strings) != 0 || m.o.StackPointer
+	m.o.Memory = len(m.data) != 0 || len(m.strings) != 0 || len(m.locals) != 0 || m.o.StackPointer
 }
 
 // stackPointer returns the symbol of env.__stack_pointer, importing it.
