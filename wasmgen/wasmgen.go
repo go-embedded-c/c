@@ -69,36 +69,74 @@ type funcSym struct {
 	sym     uint32 // symbol index
 	defined bool
 	pos     int // in o.Funcs or o.Imports
-	params  []scalar
-	result  *scalar // nil for void
+	sig
 }
 
-// signature returns the parameter and result representations of ft.
-func signature(n cc.Node, ft *cc.FunctionType) ([]scalar, *scalar, error) {
-	var ps []scalar
+// sig is a C signature as BasicCABI.md lowers it to wasm: each parameter
+// passed directly, through a pointer, or not at all; the result returned
+// directly, or through a pointer the caller passes first (sret).
+type sig struct {
+	params []param
+	result *scalar // the direct result, nil for none
+	sret   cc.Type // the aggregate returned through a pointer, or nil
+	rtype  cc.Type // the C result type
+}
+
+type param struct {
+	pass passing
+	s    scalar // the wasm value: the scalar, or the pointer
+	t    cc.Type
+}
+
+// signature returns the lowering of ft.
+func signature(n cc.Node, ft *cc.FunctionType) (sig, error) {
+	var sg sig
 	for _, p := range params(ft) {
-		s, ok := scalarOf(p.Type())
+		pass, s, ok := abiOf(p.Type())
 		if !ok {
-			return nil, nil, unsupported(n, "parameter of type "+typeName(p.Type()))
+			return sig{}, unsupported(n, "parameter of type "+typeName(p.Type()))
 		}
-		ps = append(ps, s)
+		sg.params = append(sg.params, param{pass, s, p.Type()})
 	}
-	if r := ft.Result(); !isVoid(r) {
-		s, ok := scalarOf(r)
-		if !ok {
-			return nil, nil, unsupported(n, "result of type "+typeName(r))
-		}
-		return ps, &s, nil
+	r := ft.Result()
+	sg.rtype = r
+	if isVoid(r) {
+		return sg, nil
 	}
-	return ps, nil, nil
+	pass, s, ok := abiOf(r)
+	switch {
+	case !ok:
+		return sig{}, unsupported(n, "result of type "+typeName(r))
+	case pass == passIndirect:
+		sg.sret = r
+	case pass == passDirect:
+		sg.result = &s
+	}
+	return sg, nil
+}
+
+// scalarSig is the signature of a function of scalars (the library ones).
+func scalarSig(ps []scalar, r *scalar) sig {
+	var sg sig
+	for _, s := range ps {
+		sg.params = append(sg.params, param{pass: passDirect, s: s})
+	}
+	sg.result = r
+	return sg
 }
 
 // wasmType returns the function type of a signature, sharing type indices.
-func (m *module) wasmType(ps []scalar, r *scalar) uint32 {
+func (m *module) wasmType(sg sig) uint32 {
 	var t wasm.FuncType
-	for _, p := range ps {
-		t.Params = append(t.Params, p.vt)
+	if sg.sret != nil {
+		t.Params = append(t.Params, wasm.I32)
 	}
+	for _, p := range sg.params {
+		if p.pass != passIgnored {
+			t.Params = append(t.Params, p.s.vt)
+		}
+	}
+	r := sg.result
 	if r != nil {
 		t.Results = []wasm.ValType{r.vt}
 	}
@@ -223,7 +261,7 @@ func (m *module) declareFunction(fd *cc.FunctionDefinition) error {
 	if ft.IsVariadic() {
 		return unsupported(d, "variadic function definition")
 	}
-	ps, r, err := signature(d, ft)
+	sg, err := signature(d, ft)
 	if err != nil {
 		return err
 	}
@@ -231,11 +269,11 @@ func (m *module) declareFunction(fd *cc.FunctionDefinition) error {
 	if f := m.funcs[name]; f != nil && f.defined {
 		return unsupported(d, "function defined twice")
 	}
-	if name == "main" && len(ps) != 0 {
+	if name == "main" && len(sg.params) != 0 {
 		return unsupported(d, "main with parameters")
 	}
-	m.o.Funcs = append(m.o.Funcs, wasm.Func{Type: m.wasmType(ps, r)})
-	f := &funcSym{defined: true, pos: len(m.o.Funcs) - 1, params: ps, result: r}
+	m.o.Funcs = append(m.o.Funcs, wasm.Func{Type: m.wasmType(sg)})
+	f := &funcSym{defined: true, pos: len(m.o.Funcs) - 1, sig: sg}
 	f.sym = m.symbol(wasm.Symbol{Kind: wasm.SymFunction, Flags: linkFlags(d), Name: name})
 	m.funcs[name] = f
 	if name == "main" {
@@ -261,17 +299,17 @@ func (m *module) callee(n cc.Node, d *cc.Declarator) (*funcSym, error) {
 	if ft.IsVariadic() {
 		return nil, unsupported(n, "call of a variadic function")
 	}
-	ps, r, err := signature(n, ft)
+	sg, err := signature(n, ft)
 	if err != nil {
 		return nil, err
 	}
-	return m.importFunc(d.Name(), ps, r), nil
+	return m.importFunc(d.Name(), sg), nil
 }
 
 // importFunc imports env.name with the given signature.
-func (m *module) importFunc(name string, ps []scalar, r *scalar) *funcSym {
-	m.o.Imports = append(m.o.Imports, wasm.Import{Name: name, Type: m.wasmType(ps, r)})
-	f := &funcSym{pos: len(m.o.Imports) - 1, params: ps, result: r}
+func (m *module) importFunc(name string, sg sig) *funcSym {
+	m.o.Imports = append(m.o.Imports, wasm.Import{Name: name, Type: m.wasmType(sg)})
+	f := &funcSym{pos: len(m.o.Imports) - 1, sig: sg}
 	f.sym = m.symbol(wasm.Symbol{Kind: wasm.SymFunction, Flags: wasm.SymUndefined})
 	m.funcs[name] = f
 	return f
@@ -388,7 +426,7 @@ func (m *module) stringLiteral(v string, n int64) uint32 {
 }
 
 // storable reports whether objects of type t can be laid out by the
-// generator: scalars and arrays of them (structs come with W4b).
+// generator: scalars, structures, unions and arrays of them.
 func storable(t cc.Type) bool {
 	if _, ok := scalarOf(t); ok {
 		return true
@@ -396,7 +434,9 @@ func storable(t cc.Type) bool {
 	if a, ok := t.(*cc.ArrayType); ok && !a.IsVLA() {
 		return storable(a.Elem())
 	}
-	return false
+	// A structure or union is bytes; a member of a type the generator does
+	// not compile yet is refused where it is used.
+	return isAggregate(t) && !t.IsIncomplete() && t.Size() >= 0
 }
 
 func alignLog2(n int) uint32 {

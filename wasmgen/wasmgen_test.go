@@ -42,7 +42,10 @@ func TestUnsupported(t *testing.T) {
 		{"int main(void) { static int n; return n; }", "static local"},
 		{"double d; int main(void) { return 0; }", "file-scope object of type double"},
 		{"int g(int, ...); int main(void) { return g(1, 2); }", "call of a variadic function"},
-		{"struct S { int a; }; int main(void) { struct S s; return 0; }", "local of type struct S {a int}"},
+		{"struct S { int a: 3; }; int main(void) { struct S s; s.a = 1; return s.a; }", "bit-field member (W6)"},
+		{"struct S { short i: 12; char c: 1; }; int main(void) { struct S s = {341, 1}; return 0; }", "bit-field initializer (W6)"},
+		{"struct S { short i: 12; char c: 1; } s = {341, 1}; int main(void) { return 0; }", "bit-field initializer (W6)"},
+		{"struct S { double d; }; int main(void) { struct S s = {1}; return 0; }", "initializer of type double"},
 		{"int f(void); int (*fp)(void) = f; int main(void) { return 0; }", "address of a function (W4c)"},
 		{"int f(int n) { int a[n]; return 0; } int main(void) { return f(2); }", "variable-length array"},
 		{"int main(void) { return __builtin_clz(1); }", "builtin __builtin_clz"},
@@ -80,6 +83,7 @@ func FuzzCompile(f *testing.F) {
 		"int x; int main(void) { return x; }",
 		"unsigned char c = 200; long long f(short a, unsigned b) { return a * (long long)b; } int main(void) { c += f(-3, 7); return c++ + --c; }",
 		"void abort(void); static int s = -2; int main(void) { s <<= 3; exit(s); abort(); }",
+		"struct P { int a; long long b; } g = {1, 2}; union U { char c; } u; struct P f(struct P p, union U v) { p.a += v.c; return p; } int main(void) { struct P q = f(g, u), *r = &q; return (q = g).a + r->b; }",
 	} {
 		f.Add([]byte(s))
 	}
@@ -142,6 +146,25 @@ func (h *harness) ours(src string) (oracle.Result, error) {
 		return oracle.Result{}, err
 	}
 	mod, err := h.tc.Link(ctx, obj)
+	if err != nil {
+		return oracle.Result{}, fmt.Errorf("link: %w", err)
+	}
+	return h.r.Run(ctx, mod, nil, nil)
+}
+
+// mixed links our object for src with clang's for other, and runs it: a
+// call across the two is a call across the two implementations of the ABI.
+func (h *harness) mixed(src, other string) (oracle.Result, error) {
+	ctx := context.Background()
+	obj, err := compile(h.t, h.front, src)
+	if err != nil {
+		return oracle.Result{}, err
+	}
+	theirs, err := h.tc.Compile(ctx, []byte(other), oracle.CompileOptions{Extra: []string{"-c"}})
+	if err != nil {
+		return oracle.Result{}, err
+	}
+	mod, err := h.tc.Link(ctx, obj, theirs)
 	if err != nil {
 		return oracle.Result{}, fmt.Errorf("link: %w", err)
 	}
@@ -223,6 +246,14 @@ func TestAgainstClang(t *testing.T) {
 		"static char *msg = \"hello\"; int main(void) { char *p = msg; unsigned h = 0; while (*p) h = h * 31 + *p++; return h + (p - msg); }",
 		"int main(void) { int a[4] = {1, 2}, *p = a, *q = &a[3]; long long ll[2] = {-1LL, 1LL << 40}; return (q > p) + (p == a) * 2 + a[3] * 4 + (int)(ll[1] >> 38) * 8 + (ll[0] < 0) * 64; }",
 		"void abort(void); int g; int *get(void) { return &g; } int main(void) { *get() = 9; ++*get(); (*get())++; if (g != 11) abort(); return g; }",
+		// W4b: structures and unions
+		"struct pt { int x, y; }; struct pt g = {3, 4}, h[2] = {{1, 2}, {5, 6}};\nint main(void) { struct pt a = g, *p = &h[1]; a.x += p->y; p->x = a.y; h[0] = *p; return a.x * 1000 + h[0].x * 100 + h[0].y * 10 + h[1].x; }",
+		"struct s { char tag; int v[3]; struct { short lo, hi; } r; };\nint sum(struct s *p) { int i, t = p->tag; for (i = 0; i < 3; i++) t += p->v[i]; return t + p->r.lo - p->r.hi; }\nint main(void) { struct s a = {1, {2, 3, 4}, {50, 6}}, b, c; int *q = a.v; c = b = a; q[1] = 30; return sum(&a) * 1000 + sum(&c) + (int)sizeof(struct s); }",
+		"union u { int i; unsigned char b[4]; short h[2]; }; int main(void) { union u x; x.i = 0x01020304; return x.b[0] * 1000 + x.b[3] * 100 + (x.h[1] == 0x0102) + sizeof x; }",
+		"struct v { long long a; int b; };\nstruct v pick(int c, struct v x, struct v y) { return c ? x : y; }\nint main(void) { struct v x = {1LL << 40, 2}, y = {3, 4}, z; z = pick(0, x, y); x = pick(1, x, y); return (int)(x.a >> 38) + z.b * 10 + ((void)0, x).b * 100 + (z = x, z).b * 1000 + (z = y).b * 10000; }",
+		"struct n { int v; struct n *next; }; int main(void) { struct n c = {3, 0}, b = {2, &c}, a = {1, &b}; struct n *p; int t = 0; for (p = &a; p; p = p->next) t = t * 10 + p->v; return t; }",
+		"struct a { int k; union { int i; char c; }; struct { short s; }; }; int main(void) { struct a x; x.k = 1; x.i = 0x141; x.s = 7; return x.k + x.c * 10 + x.s * 1000 + sizeof x; }",
+		"struct m { const char *s; int n; } t[] = {{\"ab\", 1}, {\"cde\", 2}}; int main(void) { int i, r = 0; for (i = 0; i < 2; i++) r = r * 100 + t[i].s[t[i].n] * t[i].n; return r; }",
 	} {
 		h.check(src)
 	}
@@ -236,6 +267,98 @@ func TestAgainstClang(t *testing.T) {
 	}
 	if same(a, b) {
 		t.Error("control: the harness did not tell exit 3 from exit 4")
+	}
+}
+
+// abiHeader declares, for TestABIAgainstClang, one function per way
+// BasicCABI.md passes a structure or union: indirect (P, C, W, Big), as a
+// singleton's scalar (L, N, U), or not at all (E, a GNU empty struct); W's
+// alignment, greater than its member's, makes it indirect.
+const abiHeader = `struct P { int a, b; };
+struct L { long long v; };
+struct N { struct { int x[1]; } in; };
+union U { short s; };
+struct C { char a, b, c; };
+struct E { };
+struct W { int v __attribute__((aligned(8))); };
+struct Big { int k[9]; };
+struct P mkp(int a, int b);
+int sump(struct P p);
+struct L mkl(long long v);
+long long getl(struct L l);
+struct N mkn(int x);
+int getn(struct N n);
+union U mku(short s);
+int getu(union U u);
+struct C mkc(char a);
+int getc3(struct C c, struct E e, int z);
+struct W mkw(int v);
+int getw(struct W w);
+struct Big mkbig(int s);
+int sumbig(struct Big b);
+struct E mke(void);
+`
+
+const abiLib = `struct P mkp(int a, int b) { struct P p; p.a = a; p.b = b; return p; }
+int sump(struct P p) { int r = p.a * 10 + p.b; p.a = 0; return r; }
+struct L mkl(long long v) { struct L l = {v}; return l; }
+long long getl(struct L l) { return l.v; }
+struct N mkn(int x) { struct N n; n.in.x[0] = x; return n; }
+int getn(struct N n) { return n.in.x[0]; }
+union U mku(short s) { union U u; u.s = s; return u; }
+int getu(union U u) { return u.s; }
+struct C mkc(char a) { struct C c = {a, a + 1, a + 2}; return c; }
+int getc3(struct C c, struct E e, int z) { return c.a + c.b * 3 + c.c * 5 + z; }
+struct W mkw(int v) { struct W w; w.v = v; return w; }
+int getw(struct W w) { return w.v; }
+struct Big mkbig(int s) { struct Big b; int i; for (i = 0; i < 9; i++) b.k[i] = s + i; return b; }
+int sumbig(struct Big b) { int i, t = 0; for (i = 0; i < 9; i++) t += b.k[i] * (i + 1); b.k[0] = 99; return t; }
+struct E mke(void) { struct E e; return e; }
+`
+
+const abiMain = `void abort(void);
+int main(void) {
+	struct P p = mkp(3, 4);
+	struct Big b = mkbig(2);
+	struct E e = mke();
+	if (sump(p) != 34 || p.a != 3) abort();
+	if (sump(mkp(1, 2)) != 12) abort();
+	if (getl(mkl((1LL << 33) + 5)) != (1LL << 33) + 5) abort();
+	if (getn(mkn(7)) != 7) abort();
+	if (getu(mku(-3)) != -3) abort();
+	if (getc3(mkc(10), e, 1) != 10 + 33 + 60 + 1) abort();
+	if (getw(mkw(11)) != 11) abort();
+	if (sumbig(b) != 2 * 45 + 240 || b.k[0] != 2) abort();
+	return mkp(5, 6).b + mkl(9).v + mkbig(1).k[8] * 100;
+}
+`
+
+// TestABIAgainstClang: structures and unions cross between our code and
+// clang's, both ways, and the program exits as clang's alone does. The
+// control is the single-file comparison: it cannot see an ABI that is
+// wrong the same way on both sides, which the mixed links do.
+func TestABIAgainstClang(t *testing.T) {
+	h := newHarness(t)
+	want, err := h.theirs(abiHeader + abiLib + abiMain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want.Exit != 6+9+900 {
+		t.Fatalf("clang alone: %+v", want)
+	}
+	h.check(abiHeader + abiLib + abiMain)
+	for _, c := range []struct{ name, ours, theirs string }{
+		{"our caller, clang's callee", abiHeader + abiMain, abiHeader + abiLib},
+		{"clang's caller, our callee", abiHeader + abiLib, abiHeader + abiMain},
+	} {
+		got, err := h.mixed(c.ours, c.theirs)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if !same(got, want) {
+			t.Errorf("%s: %+v, want %+v", c.name, got, want)
+		}
 	}
 }
 

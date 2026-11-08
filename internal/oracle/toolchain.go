@@ -166,17 +166,20 @@ func (t *Toolchain) linkArgs() []string {
 	}
 }
 
-// Link links a relocatable object (wasmgen's output) into a WASI command,
-// with the same crt1.o, libc and flags as Compile's programs. A
-// *CompileError means wasm-ld refused the object.
-func (t *Toolchain) Link(ctx context.Context, obj []byte) ([]byte, error) {
+// Link links relocatable objects (wasmgen's output, or clang's with -c)
+// into a WASI command, with the same crt1.o, libc and flags as Compile's
+// programs. A *CompileError means wasm-ld refused them.
+func (t *Toolchain) Link(ctx context.Context, objs ...[]byte) ([]byte, error) {
 	return t.drive(ctx, 30*time.Second, func(dir, out string) ([]string, []byte, error) {
-		in := filepath.Join(dir, "a.o")
-		if err := os.WriteFile(in, obj, 0o600); err != nil {
-			return nil, nil, err
-		}
 		args := append(t.targetArgs(), t.linkArgs()...)
-		return append(args, in, "-o", out), nil, nil
+		for i, obj := range objs {
+			in := filepath.Join(dir, fmt.Sprintf("o%d.o", i))
+			if err := os.WriteFile(in, obj, 0o600); err != nil {
+				return nil, nil, err
+			}
+			args = append(args, in)
+		}
+		return append(args, "-o", out), nil, nil
 	})
 }
 

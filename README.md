@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3 and W4a are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), and memory (pointers, arrays, the linear-stack frame, string literals, static addresses). 762 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a and W4b are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), and structures and unions with the BasicCABI passing rules. 952 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -216,20 +216,38 @@ W4a adds memory:
 - Like clang, an assignment evaluates its right operand before the left
   one. `x[0] |= f()` can observe the difference when `f` changes `x[0]`.
 
+W4b adds structures and unions:
+
+- Members through `.` and `->`, anonymous members, nested aggregates,
+  arrays of them, and their initialisers, static or not.
+- Assignment, `?:` and the comma operator on whole structures. Each copies
+  the bytes with `memory.copy`.
+- Passing and returning them as BasicCABI.md specifies:
+  - a structure or union holding a single scalar travels as that scalar;
+  - an empty one is not passed at all;
+  - any other is passed through a pointer to a copy the caller makes, and
+    is returned through a pointer the caller passes first.
+- Bit-fields are still refused, in members and in initialisers (W6).
+
 The generator refuses anything else with an `*Unsupported` error that names
 the construct.
 
-Three tests check the generator:
+Four tests check the generator:
 
 - `TestRandomExpressions` generates random programs without undefined
   behaviour. Each must exit exactly as clang's does: 60 programs in CI, 600
   checked locally. A deliberately miscompiled sign extension makes it
   fail.
+- `TestABIAgainstClang` links our object with clang's, in both directions,
+  and calls across them with every way of passing a structure. A
+  single-file comparison cannot catch an ABI that both sides get wrong in
+  the same way; these mixed links do. Treating no structure as a
+  singleton makes only the mixed links fail.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-07, after W4a, 762 files ran the same as under clang (454 after
-  W3, 10 after W2). The test holds that count as a floor and logs the
-  refusals by cause; variadic functions and struct members (W4b) are now
-  first.
+  2026-11-08, after W4b, 952 files ran the same as under clang (762 after
+  W4a, 454 after W3, 10 after W2). The test holds that count as a floor
+  and logs the refusals by cause. Bit-fields (W6) and variadic functions
+  are now the most common.
   - No other file differs. The one known difference, `shiftdi-2.c`, comes
     from the oracle compiling with `-std=gnu89`, where a large decimal
     constant has another type (#20).

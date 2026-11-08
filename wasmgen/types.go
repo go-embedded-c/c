@@ -47,6 +47,88 @@ func scalarOf(t cc.Type) (scalar, bool) {
 	return s, true
 }
 
+// isAggregate reports whether t is a struct or union.
+func isAggregate(t cc.Type) bool {
+	if t == nil {
+		return false
+	}
+	k := t.Kind()
+	return k == cc.Struct || k == cc.Union
+}
+
+// passing is how BasicCABI.md passes a value of a type, as a parameter or
+// a result: scalars and singleton aggregates directly, an empty aggregate
+// not at all, any other aggregate through a pointer (indirect).
+type passing int
+
+const (
+	passDirect passing = iota
+	passIgnored
+	passIndirect
+)
+
+// abiOf classifies t; s is the wasm scalar for passDirect.
+func abiOf(t cc.Type) (passing, scalar, bool) {
+	if !isAggregate(t) {
+		s, ok := scalarOf(t)
+		return passDirect, s, ok
+	}
+	if t.IsIncomplete() {
+		return 0, scalar{}, false
+	}
+	if t.Size() == 0 {
+		return passIgnored, scalar{}, true
+	}
+	if s, ok := singleton(t); ok {
+		return passDirect, s, true
+	}
+	return passIndirect, scalar{vt: wasm.I32, bits: 32, ptr: true, elem: t.Size()}, true
+}
+
+// singleton is BasicCABI.md's "struct or union that recursively (including
+// through nested structs, unions, and arrays) contains just a single
+// scalar value and is not specified to have greater than natural
+// alignment": it is passed as that scalar.
+func singleton(t cc.Type) (scalar, bool) {
+	switch x := t.(type) {
+	case *cc.ArrayType:
+		if x.Len() != 1 {
+			return scalar{}, false
+		}
+		return singleton(x.Elem())
+	case *cc.StructType, *cc.UnionType:
+		var fields []*cc.Field
+		var n int
+		if st, ok := x.(*cc.StructType); ok {
+			n = st.NumFields()
+			for i := range n {
+				fields = append(fields, st.FieldByIndex(i))
+			}
+		} else {
+			ut := x.(*cc.UnionType)
+			n = ut.NumFields()
+			for i := range n {
+				fields = append(fields, ut.FieldByIndex(i))
+			}
+		}
+		var only *cc.Field
+		for _, f := range fields {
+			if f == nil || f.Type().Size() == 0 {
+				continue
+			}
+			if only != nil || f.IsBitfield() {
+				return scalar{}, false
+			}
+			only = f
+		}
+		if only == nil || t.Align() > only.Type().Align() || t.Size() != only.Type().Size() {
+			return scalar{}, false
+		}
+		return singleton(only.Type())
+	}
+	return scalarOf(t)
+}
+
 // isVoid reports whether t is void.
 func isVoid(t cc.Type) bool { return t != nil && t.Kind() == cc.Void }
 
