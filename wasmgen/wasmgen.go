@@ -61,6 +61,8 @@ type module struct {
 	// Static locals by declarator, and the names their symbols took.
 	locals     map[*cc.Declarator]*dataSym
 	localNames map[string]bool
+	// layouts: whether cc/v4's layout of a type agrees with clang's.
+	layouts map[cc.Type]bool
 	// String literal symbols by contents.
 	strings map[string]uint32
 	sp      uint32 // the __stack_pointer symbol, when imported
@@ -197,7 +199,7 @@ func CompileLimits(ast *cc.AST, file string, lim Limits) (obj []byte, err error)
 		}
 	}()
 	m := &module{o: &wasm.Object{}, lim: lim.withDefaults(), types: map[string]uint32{}, funcs: map[string]*funcSym{}, data: map[string]*dataSym{}, strings: map[string]uint32{},
-		locals: map[*cc.Declarator]*dataSym{}, localNames: map[string]bool{}}
+		locals: map[*cc.Declarator]*dataSym{}, localNames: map[string]bool{}, layouts: map[cc.Type]bool{}}
 	var defs []*cc.FunctionDefinition
 	for l := ast.TranslationUnit; l != nil; l = l.TranslationUnit {
 		ed := l.ExternalDeclaration
@@ -369,6 +371,9 @@ func (m *module) object(d *cc.Declarator, id *cc.InitDeclarator) error {
 	if !storable(t) {
 		return unsupported(d, "file-scope object of type "+typeName(t))
 	}
+	if !m.layoutOK(t) {
+		return unsupported(d, layoutRefusal)
+	}
 	name := d.Name()
 	prev := m.data[name]
 	if prev != nil && prev.defined {
@@ -477,6 +482,9 @@ func (m *module) staticLocal(fn string, d *cc.Declarator, id *cc.InitDeclarator)
 	}
 	if !storable(t) {
 		return unsupported(d, "static local of type "+typeName(t))
+	}
+	if !m.layoutOK(t) {
+		return unsupported(d, layoutRefusal)
 	}
 	name := fn + "." + d.Name()
 	for i := 1; m.localNames[name]; i++ {

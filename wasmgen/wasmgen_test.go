@@ -49,9 +49,9 @@ func TestUnsupported(t *testing.T) {
 		{"void f(int n) { struct S { int i[n]; int k; } s; } int main(void) { f(1); return 0; }", "local of type struct S {i array of int; k int}"},
 		{"int f(int n, void *p) { struct S { int i[n]; int k; } *s = p; return s->k; } int main(void) { return 0; }", "member of a structure with a variable-length array"},
 		{"int g(int n) { __builtin_va_start(n, n); return 0; } int main(void) { return g(1); }", "va_start outside a variadic function"},
-		{"struct S { int a: 3; }; int main(void) { struct S s; s.a = 1; return s.a; }", "bit-field member (W6)"},
-		{"struct S { short i: 12; char c: 1; }; int main(void) { struct S s = {341, 1}; return 0; }", "bit-field initializer (W6)"},
-		{"struct S { short i: 12; char c: 1; } s = {341, 1}; int main(void) { return 0; }", "bit-field initializer (W6)"},
+		{"struct S { long long a: 24; }; int main(void) { struct S s; s.a = 1; return s.a; }", "bit-field of a type wider than int, narrower than int"},
+		{"int x; struct S { int a: 3; } s = {x}; int main(void) { return 0; }", "non-constant bit-field initializer"},
+		{"struct S { unsigned long long f:44; _Bool g:1; short h; }; int main(void) { struct S s; s.h = 1; return s.h; }", "bit-field layout that cc/v4 computes otherwise than clang"},
 		{"struct S { long double d; }; int main(void) { struct S s = {1}; return 0; }", "initializer of type long double"},
 		{"int f(void); int (*fp)(void) = f; int main(void) { return 0; }", "address of a function (W4c)"},
 		{"int f(int n) { int a[n]; return 0; } int main(void) { return f(2); }", "variable-length array"},
@@ -292,6 +292,10 @@ func TestAgainstClang(t *testing.T) {
 		"char a[3][2][5] = {{\"ab\", \"cd\"}, {\"ef\", \"gh\"}}; char (*p)[5] = &a[1][1]; char *q = a[1][1]; char (*r)[5] = &a[0][1];\nint main(void) { return (*p)[1] * 1000 + q[0] + (*r)[1] * 1000000; }",
 		// calls without a prototype, with more or fewer arguments (920501-1.c)
 		"int s[2]; int calls;\nx(){if(!s[0]){s[1+s[1]]=s[1];return 1;}}\ny(a, b) int a, b; { return a * 10 + b; }\nint t(int v) { calls++; return v; }\nmain(){s[0]=s[1]=0;if(x(t(0), t(1))!=1)abort();return calls * 100 + y(4, 2);}",
+		// W6: bit-fields, with the bytes of the objects printed so that the
+		// layout shows
+		"#include <stdio.h>\nstruct S { unsigned a:3; int b:5; unsigned c:1; signed char d:4; long long e:40; unsigned long long f:44; _Bool g:1; int h:16; int i:7; };\nstruct S gs = {5, -3, 1, -8, -123456789012LL, 0xabcdef12345ULL, 1, -2, 63};\nvoid dump(void *o, int n) { unsigned char *p = o; while (n--) printf(\"%02x\", *p++); printf(\"\\n\"); }\nint main(void) {\n int x = 2; struct S s = {1, x, 0, 3, 4, 5, 0, 6, 7};\n s.a += 6; s.b = s.b * 9; s.c++; s.d -= 9; s.e <<= 3; s.f = -1; s.g = 5; s.i = (s.h = 300) + 100;\n int v = (s.b = 100), w = s.c--;\n printf(\"%u %d %u %d %lld %llx %d %d %d %d %d\\n\", s.a, s.b, s.c, s.d, s.e, s.f, s.g, s.h, s.i, v, w);\n dump(&s, sizeof s);\n printf(\"%u %d %u %d %lld %llx %d %d %d %d\\n\", gs.a, gs.b, gs.c, gs.d, gs.e, gs.f, gs.g, gs.h, gs.i, (int)sizeof gs);\n dump(&gs, sizeof gs);\n return 0;\n}",
+		"#include <stdio.h>\nstruct T { short i : 12; char c1 : 1; char c2 : 1; char c3 : 1; char c4 : 1; } t0 = {341, 1, 1, 1, 1};\nunion U { unsigned a:4; unsigned char b; };\nstruct P { struct T t; unsigned k:20; } gp = {{-1, 0, 1, 0, -1}, 0xfffff};\nint main(void) { struct T t = {341, 1, 1, 1, 1}; union U u; struct P p = gp; u.b = 0xff; u.a = 0; p.t.i += 2; p.k >>= 4; printf(\"%d %d %d %x %d %x %d\\n\", *(char *)&t, *(char *)&t0, t.c4, u.b, p.t.i, p.k, sizeof(struct P)); return t.c1 + t.c2 * 2; }",
 		// W5: float and double, printed with %a so that every bit shows
 		"#include <stdio.h>\nint main(void) {\n float f = 1.1f; double d = 1.1; float g = d; double h = f;\n printf(\"%a %a %a %a\\n\", f, d, g, h);\n printf(\"%a %a %a %a\\n\", f * 3.0f, d / 3, f + d, f / 3);\n int i = d * 10; unsigned u = 3.9; long long ll = -2.5e10; unsigned long long ull = 1e19; signed char c = -3.7; unsigned short us = 65535.5;\n printf(\"%d %u %lld %llu %d %d\\n\", i, u, ll, ull, c, us);\n printf(\"%a %a %a %a\\n\", (double)-7, (float)4000000001u, (double)(1ULL << 63), (float)-9007199254740993LL);\n _Bool b = 0.5; _Bool z = -0.0;\n printf(\"%d %d %a %a %a\\n\", b, z, -0.0, -d, -(0.0f));\n return (f < d) + (g == f) * 2;\n}",
 		"#include <stdio.h>\nint main(void) { double z = 0, n = z / z, inf = 1 / z; int c = 0; if (n) c += 1; if (!n) c += 2; c += (n == n) * 4 + (n != n) * 8 + (n < 1) * 16 + (inf > 1e308) * 32 + (n ? 64 : 128) + (z == -z) * 256 + (n >= n || n <= n) * 512; printf(\"%f %f %d %d\\n\", inf, -inf, c, z && n); return 0; }",

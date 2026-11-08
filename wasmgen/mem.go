@@ -30,7 +30,20 @@ func (m *module) staticInit(in *cc.Initializer, seg *wasm.Segment) error {
 		return nil
 	}
 	if bitfieldLeaf(in) {
-		return unsupported(in, "bit-field initializer (W6)")
+		u, err := unitOf(in, in.Field())
+		if err != nil {
+			return err
+		}
+		v, ok := intValue(in.AssignmentExpression)
+		if !ok {
+			return unsupported(in, "non-constant bit-field initializer")
+		}
+		off := in.Offset()
+		if off < 0 || off+u.bytes > int64(len(seg.Init)) {
+			return unsupported(in, "initializer outside its object")
+		}
+		staticBitfield(seg.Init, off, u, v)
+		return nil
 	}
 	t, e, off := in.Type(), in.AssignmentExpression, in.Offset()
 	for i := range in.Len() {
@@ -381,36 +394,12 @@ func (g *fgen) addr(e cc.ExpressionNode) error {
 	case *cc.PostfixExpression:
 		switch x.Case {
 		case cc.PostfixExpressionSelect, cc.PostfixExpressionPSelect:
-			// E.m and E->m (C11 6.5.2.3): the member's offset from the
-			// address of the structure or union.
-			f := x.Field()
-			if f == nil {
-				return unsupported(x, "member")
+			if f := x.Field(); f != nil && f.IsBitfield() {
+				// A bit-field has no address (C11 6.5.3.2p1); its value
+				// goes through a target (bitfield.go).
+				return unsupported(x, "address of a bit-field")
 			}
-			if f.IsBitfield() {
-				return unsupported(x, "bit-field member (W6)")
-			}
-			base := x.PostfixExpression.Type()
-			if x.Case == cc.PostfixExpressionPSelect {
-				base = elemOf(base)
-			}
-			if hasVLA(base) {
-				return unsupported(x, "member of a structure with a variable-length array")
-			}
-			var err error
-			if x.Case == cc.PostfixExpressionSelect {
-				err = g.aggAddr(x.PostfixExpression)
-			} else {
-				err = g.ptrValue(x.PostfixExpression)
-			}
-			if err != nil {
-				return err
-			}
-			if off := f.Offset(); off != 0 {
-				g.constant(off, intScalar)
-				g.op(opI32Add)
-			}
-			return nil
+			return g.memberAddr(x)
 		}
 		if x.Case == cc.PostfixExpressionIndex {
 			// E1[E2] is *(E1 + E2); either operand may be the pointer.
@@ -431,6 +420,40 @@ func (g *fgen) addr(e cc.ExpressionNode) error {
 		}
 	}
 	return unsupported(e, "lvalue")
+}
+
+// memberAddr pushes the address of E.m or E->m (C11 6.5.2.3): the member's
+// offset from the address of the structure or union. For a bit-field it is
+// the address of its storage unit.
+func (g *fgen) memberAddr(x *cc.PostfixExpression) error {
+	f := x.Field()
+	if f == nil {
+		return unsupported(x, "member")
+	}
+	base := x.PostfixExpression.Type()
+	if x.Case == cc.PostfixExpressionPSelect {
+		base = elemOf(base)
+	}
+	if hasVLA(base) {
+		return unsupported(x, "member of a structure with a variable-length array")
+	}
+	if !g.m.layoutOK(base) {
+		return unsupported(x, layoutRefusal)
+	}
+	var err error
+	if x.Case == cc.PostfixExpressionSelect {
+		err = g.aggAddr(x.PostfixExpression)
+	} else {
+		err = g.ptrValue(x.PostfixExpression)
+	}
+	if err != nil {
+		return err
+	}
+	if off := f.Offset(); off != 0 {
+		g.constant(off, intScalar)
+		g.op(opI32Add)
+	}
+	return nil
 }
 
 // aggAddr pushes the address of a structure or union value: an lvalue's
@@ -620,6 +643,9 @@ func (g *fgen) memoryLocal(d *cc.Declarator, id *cc.InitDeclarator) error {
 	if !storable(t) {
 		return unsupported(d, "local of type "+typeName(t))
 	}
+	if !g.m.layoutOK(t) {
+		return unsupported(d, layoutRefusal)
+	}
 	if size > maxObject {
 		return unsupported(d, "local larger than the limit")
 	}
@@ -676,7 +702,24 @@ func (g *fgen) localInit(in *cc.Initializer, slot int64) error {
 		return nil
 	}
 	if bitfieldLeaf(in) {
-		return unsupported(in, "bit-field initializer (W6)")
+		u, err := unitOf(in, in.Field())
+		if err != nil {
+			return err
+		}
+		a := g.local(wasm.I32)
+		g.slotAddress(slot + in.Offset())
+		g.op(opLocalSet)
+		g.uleb(uint64(a))
+		from, err := g.rvalue(in.AssignmentExpression)
+		if err != nil {
+			return err
+		}
+		v := g.local(u.s.vt)
+		g.convert(from, u.field())
+		g.op(opLocalSet)
+		g.uleb(uint64(v))
+		g.insert(u, a, v)
+		return nil
 	}
 	t, e := in.Type(), in.AssignmentExpression
 	for i := range in.Len() {

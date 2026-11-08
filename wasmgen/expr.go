@@ -609,6 +609,11 @@ type target struct {
 	e     cc.ExpressionNode // the lvalue, for memory
 	addr  uint32            // a local holding its address, once address ran
 	s     scalar
+	// A bit-field: e is the member expression, addr holds its unit's
+	// address.
+	bf     bool
+	unit   bitunit
+	member *cc.PostfixExpression
 }
 
 func (g *fgen) lvalue(e cc.ExpressionNode) (*target, error) {
@@ -616,6 +621,13 @@ func (g *fgen) lvalue(e cc.ExpressionNode) (*target, error) {
 	s, ok := scalarOf(e.Type())
 	if !ok {
 		return nil, unsupported(e, "lvalue of type "+typeName(e.Type()))
+	}
+	if x, f := bitfieldOf(e); f != nil {
+		u, err := unitOf(x, f)
+		if err != nil {
+			return nil, err
+		}
+		return &target{e: e, s: s, bf: true, unit: u, member: x}, nil
 	}
 	if x, ok := e.(*cc.PrimaryExpression); ok && x.Case == cc.PrimaryExpressionIdent {
 		if d, ok := x.ResolvedTo().(*cc.Declarator); ok {
@@ -640,7 +652,13 @@ func (g *fgen) address(t *target) error {
 	if t.local {
 		return nil
 	}
-	if err := g.addr(t.e); err != nil {
+	var err error
+	if t.bf {
+		err = g.memberAddr(t.member)
+	} else {
+		err = g.addr(t.e)
+	}
+	if err != nil {
 		return err
 	}
 	t.addr = g.local(wasm.I32)
@@ -658,6 +676,12 @@ func (g *fgen) loadTarget(t *target) error {
 	}
 	g.op(opLocalGet)
 	g.uleb(uint64(t.addr))
+	if t.bf {
+		g.loadUnit(t.unit)
+		g.extract(t.unit)
+		g.convert(t.unit.field(), t.s)
+		return nil
+	}
 	op, align := t.s.load()
 	g.memarg(op, align)
 	return nil
@@ -669,6 +693,26 @@ func (g *fgen) store(t *target, want bool) {
 	if t.local {
 		g.op(pick(want, opLocalTee, opLocalSet))
 		g.uleb(uint64(t.index))
+		return
+	}
+	if t.bf {
+		// The value, in the unit's type; the address under it is in
+		// t.addr already.
+		v := g.local(t.unit.s.vt)
+		g.convert(t.s, t.unit.field())
+		g.op(opLocalSet)
+		g.uleb(uint64(v))
+		g.op(opDrop)
+		g.insert(t.unit, t.addr, v)
+		if want {
+			// The value of the assignment is the field's, after it
+			// (C11 6.5.16p3): what was stored, truncated to the width.
+			g.op(opLocalGet)
+			g.uleb(uint64(t.addr))
+			g.loadUnit(t.unit)
+			g.extract(t.unit)
+			g.convert(t.unit.field(), t.s)
+		}
 		return
 	}
 	var tmp uint32
@@ -692,6 +736,13 @@ func (g *fgen) load(e cc.ExpressionNode) error {
 		return err
 	}
 	if t.local {
+		return g.loadTarget(t)
+	}
+	if t.bf {
+		if err := g.address(t); err != nil {
+			return err
+		}
+		g.op(opDrop)
 		return g.loadTarget(t)
 	}
 	if err := g.addr(t.e); err != nil {
