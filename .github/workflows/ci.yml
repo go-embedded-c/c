@@ -83,7 +83,11 @@ jobs:
   oracle:
     runs-on: ubuntu-latest
     env:
-      CORACLE_HOME: ${{ github.workspace }}/../coracle-home
+      # Outside the checkout, and without '..': actions/cache refuses a path
+      # holding '.' or '..' ("Invalid pattern") and then saves nothing, so
+      # every run downloaded LLVM again. (The runner context is not
+      # available in a job's env.)
+      CORACLE_HOME: /home/runner/coracle-home
       CORACLE_REQUIRE: "1"
     steps:
       - uses: actions/checkout@v7
@@ -93,7 +97,7 @@ jobs:
       - name: Toolchain cache
         uses: actions/cache@v6.1.0
         with:
-          path: ${{ github.workspace }}/../coracle-home
+          path: ${{ env.CORACLE_HOME }}
           key: coracle-home-llvm-23.1.4-wasi-libc-d9ad2d11991c-${{ hashFiles('internal/provision/provision.go') }}
       - run: sudo apt-get install -y -qq zstd cmake make
       - name: Provision the pinned toolchain
