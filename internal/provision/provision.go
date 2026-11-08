@@ -24,6 +24,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-embedded-c/c/internal/oracle"
 )
@@ -75,6 +78,17 @@ func FileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// Download parameters. GitHub's release CDN has answered a whole-file GET
+// of the LLVM archive with 504 for hours while serving byte ranges of the
+// same file (2026-11-08), so the archive is fetched in ranges, each retried.
+// The sha256 check at the end is what guarantees the bytes.
+var (
+	chunkSize  int64 = 64 << 20
+	attempts         = 5
+	retryWait        = 2 * time.Second // times the attempt number
+	maxArchive int64 = 8 << 30         // the LLVM archives are under 2 GiB
+)
+
 // Download fetches url into dst and checks its sha256; a file already there
 // with the right sum is kept. A wrong sum deletes the file and is an error.
 func Download(ctx context.Context, url, dst, want string) error {
@@ -84,23 +98,11 @@ func Download(ctx context.Context, url, dst, want string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("provision: GET %s: %s", url, resp.Status)
-	}
 	f, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(f, resp.Body)
+	err = fetch(ctx, url, f)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -117,6 +119,123 @@ func Download(ctx context.Context, url, dst, want string) error {
 		return fmt.Errorf("provision: %s has sha256 %s, want %s", url, got, want)
 	}
 	return nil
+}
+
+// fetch writes the body of url into f, range by range.
+func fetch(ctx context.Context, url string, f *os.File) error {
+	total := int64(-1)
+	for off := int64(0); total < 0 || off < total; {
+		n, size, err := fetchRange(ctx, url, f, off)
+		if err != nil {
+			return err
+		}
+		if size < 0 {
+			return nil // the server sent the whole file
+		}
+		if total >= 0 && size != total {
+			return fmt.Errorf("provision: GET %s: the size changed from %d to %d", url, total, size)
+		}
+		total = size
+		off += n
+	}
+	return nil
+}
+
+// errPermanent marks a failure a retry cannot fix.
+type errPermanent struct{ error }
+
+// fetchRange writes the range of url starting at off into f, retrying a
+// server error or a broken transfer. It returns the bytes written and the
+// file's total size, or -1 when the server ignored the range and sent the
+// whole file from offset 0.
+func fetchRange(ctx context.Context, url string, f *os.File, off int64) (int64, int64, error) {
+	var err error
+	for i := range attempts {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return 0, 0, ctx.Err()
+			case <-time.After(time.Duration(i) * retryWait):
+			}
+		}
+		var n, size int64
+		n, size, err = fetchRangeOnce(ctx, url, f, off)
+		if err == nil {
+			return n, size, nil
+		}
+		if p, ok := err.(errPermanent); ok {
+			return 0, 0, p.error
+		}
+	}
+	return 0, 0, err
+}
+
+func fetchRangeOnce(ctx context.Context, url string, f *os.File, off int64) (int64, int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, 0, errPermanent{err}
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, off+chunkSize-1))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, 0, err // the network: retried
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusOK && off == 0:
+		// No range support: the whole file, bounded.
+		n, err := io.Copy(io.NewOffsetWriter(f, 0), io.LimitReader(resp.Body, maxArchive+1))
+		if err == nil && n > maxArchive {
+			return 0, 0, errPermanent{fmt.Errorf("provision: GET %s: larger than %d bytes", url, maxArchive)}
+		}
+		return n, -1, err
+	case resp.StatusCode == http.StatusPartialContent:
+	case resp.StatusCode >= 500:
+		return 0, 0, fmt.Errorf("provision: GET %s: %s", url, resp.Status)
+	default:
+		return 0, 0, errPermanent{fmt.Errorf("provision: GET %s: %s", url, resp.Status)}
+	}
+	first, last, size, err := parseContentRange(resp.Header.Get("Content-Range"))
+	if err != nil || first != off || size > maxArchive {
+		return 0, 0, errPermanent{fmt.Errorf("provision: GET %s: Content-Range %q for offset %d", url, resp.Header.Get("Content-Range"), off)}
+	}
+	want := last - first + 1
+	n, err := io.Copy(io.NewOffsetWriter(f, off), io.LimitReader(resp.Body, want))
+	if err == nil && n != want {
+		err = fmt.Errorf("provision: GET %s: %d bytes of %d at offset %d", url, n, want, off)
+	}
+	return n, size, err
+}
+
+// parseContentRange parses "bytes first-last/size" (RFC 9110 §14.4), with
+// first <= last < size; the unknown size "*" is refused.
+func parseContentRange(s string) (first, last, size int64, err error) {
+	rest, ok := strings.CutPrefix(s, "bytes ")
+	if !ok {
+		return 0, 0, 0, fmt.Errorf("content-range %q: no bytes unit", s)
+	}
+	span, total, ok := strings.Cut(rest, "/")
+	if !ok {
+		return 0, 0, 0, fmt.Errorf("content-range %q: no size", s)
+	}
+	a, b, ok := strings.Cut(span, "-")
+	if !ok {
+		return 0, 0, 0, fmt.Errorf("content-range %q: no range", s)
+	}
+	for _, p := range []struct {
+		s string
+		v *int64
+	}{{a, &first}, {b, &last}, {total, &size}} {
+		v, err := strconv.ParseInt(p.s, 10, 64)
+		if err != nil || v < 0 {
+			return 0, 0, 0, fmt.Errorf("content-range %q: bad number %q", s, p.s)
+		}
+		*p.v = v
+	}
+	if first > last || last >= size {
+		return 0, 0, 0, fmt.Errorf("content-range %q: inconsistent", s)
+	}
+	return first, last, size, nil
 }
 
 func run(ctx context.Context, log io.Writer, dir string, name string, args ...string) error {

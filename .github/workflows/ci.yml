@@ -70,6 +70,7 @@ jobs:
           - { pkg: ./cell, target: FuzzSplit }
           - { pkg: ./cell, target: FuzzAnalyze }
           - { pkg: ./wasmgen, target: FuzzCompile }
+          - { pkg: ./internal/provision, target: FuzzParseContentRange }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
