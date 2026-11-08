@@ -77,9 +77,9 @@ type funcSym struct {
 // directly, or through a pointer the caller passes first (sret).
 type sig struct {
 	params []param
-	result *scalar   // the direct result, nil for none
-	sret   cc.Type   // the aggregate returned through a pointer, or nil
-	rtype  cc.Type   // the C result type
+	result *scalar // the direct result, nil for none
+	sret   cc.Type // the aggregate returned through a pointer, or nil
+	rtype  cc.Type // the C result type
 }
 
 type param struct {
