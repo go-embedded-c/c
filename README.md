@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, and `float` and `double`. 1160 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d, W5 and W6 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float` and `double`, and bit-fields. 1250 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -264,6 +264,24 @@ is the one clang emits at `-O0` (checked with `llvm-objdump`):
 - `long double` (binary128) is refused, and so are GNU vector types: they
   were read as their element type before.
 
+W6 adds bit-fields:
+
+- A read loads the field's storage unit and extracts the bits. It
+  sign-extends them when the declared type is signed; a plain `int`
+  bit-field is signed, as in clang.
+- A write loads the unit, clears the field's bits, ORs the new ones in
+  and stores the unit back. The neighbouring fields keep their values.
+- Initialisers set the bits, in the data for a static object and in the
+  frame for a local one. The value of an assignment is the stored value,
+  truncated to the width.
+- cc/v4 lays bit-fields out by its own rule, which is not clang's
+  (Itanium). For example, `struct { unsigned long long f:44; _Bool g:1;
+  short h; }` has `h` at 6 under clang and at 8 under cc/v4. The
+  generator computes clang's layout of every structure with bit-fields
+  and refuses one that cc/v4 lays out otherwise.
+- A bit-field of a type wider than `int` but narrower than 32 bits is
+  refused. cc/v4 types it `int`, while clang keeps its declared type.
+
 The generator refuses anything else with an `*Unsupported` error that names
 the construct.
 
@@ -281,12 +299,12 @@ Four tests check the generator:
   misaligning a `long long` in the varargs buffer, on the side that is
   ours.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-08, after W5, 1160 files ran the same as under clang (1049 after
-  W4d, 1005 after W4c, 952 after W4b, 762 after W4a, 454 after W3, 10 after
-  W2). The test holds that count as a floor and logs the refusals by
-  cause, with three files for each. Bit-fields (W6), `asm` statements and
-  `goto` (W7) are now the most common. It also names each file clang
-  refuses that we compile.
+  2026-11-08, after W6, 1250 files ran the same as under clang (1160 after
+  W5, 1049 after W4d, 1005 after W4c, 952 after W4b, 762 after W4a, 454
+  after W3, 10 after W2). The test holds that count as a floor and logs
+  the refusals by cause, with three files for each. `asm` statements,
+  `goto` (W7) and `memset`/`memcpy` builtins are now the most common. It
+  also names each file clang refuses that we compile.
   - No other file differs. There are three known differences:
     - `shiftdi-2.c` comes from the oracle compiling with `-std=gnu89`,
       where a large decimal constant has another type (#20);
