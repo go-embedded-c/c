@@ -57,6 +57,7 @@ type fgen struct {
 	spilled   []spilledParam
 	refs      map[*cc.Declarator]uint32 // parameters passed by address: the local holding it
 	sig       sig                       // the function's lowered signature
+	name      string                    // the function's, for its static locals' symbols
 	variadic  bool                      // the function takes `...`
 	va        uint32                    // then, the parameter with its varargs buffer
 }
@@ -113,7 +114,7 @@ func (m *module) function(fd *cc.FunctionDefinition) error {
 	if !ok || f == nil {
 		return unsupported(d, "function definition of type "+typeName(d.Type()))
 	}
-	g := &fgen{m: m, fn: f.pos, vars: map[*cc.Declarator]uint32{}, void: f.result == nil, sig: f.sig,
+	g := &fgen{m: m, fn: f.pos, name: d.Name(), vars: map[*cc.Declarator]uint32{}, void: f.result == nil, sig: f.sig,
 		cases: map[*cc.LabeledStatement]*block{}, slots: map[*cc.Declarator]int64{}, refs: map[*cc.Declarator]uint32{}}
 	if !g.void {
 		g.result = *f.result
@@ -579,7 +580,12 @@ func (g *fgen) localDeclaration(decl *cc.Declaration) error {
 		case d.IsTypename(), d.Type().Kind() == cc.Function, d.IsExtern():
 			continue
 		case d.IsStatic():
-			return unsupported(d, "static local")
+			// Initialised once, before the program starts (C11 6.2.4p3,
+			// 6.7.9p10): not here.
+			if err := g.m.staticLocal(g.name, d, id); err != nil {
+				return err
+			}
+			continue
 		}
 		s, ok := scalarOf(d.Type())
 		if !ok || d.AddressTaken() {

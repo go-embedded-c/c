@@ -231,7 +231,12 @@ func (m *module) staticObject(n cc.Node, d *cc.Declarator) (uint32, int64, error
 		return 0, 0, unsupported(n, "address of a function (W4c)")
 	}
 	if d.Linkage() == cc.None {
-		return 0, 0, unsupported(n, "address of a static local")
+		ds, ok := m.locals[d]
+		if !ok {
+			// __func__, whose declaration items leaves out.
+			return 0, 0, unsupported(n, "static local "+d.Name())
+		}
+		return ds.sym, 0, nil
 	}
 	ds, err := m.global(n, d)
 	if err != nil {
