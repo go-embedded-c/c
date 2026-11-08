@@ -219,6 +219,38 @@ func TestExtractMemberOfTheRealArchive(t *testing.T) {
 	}
 }
 
+// TestDownloadFrom: when the first address keeps failing, the second one
+// delivers, and it is asked for the bytes (the REST API asset URL needs
+// Accept: application/octet-stream).
+func TestDownloadFrom(t *testing.T) {
+	small(t)
+	body := []byte("0123456789")
+	sum := sha256.Sum256(body)
+	want := hex.EncodeToString(sum[:])
+	var accept string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/down" {
+			w.WriteHeader(http.StatusGatewayTimeout)
+			return
+		}
+		accept = r.Header.Get("Accept")
+		http.ServeContent(w, r, "a", time.Unix(0, 0), bytes.NewReader(body))
+	}))
+	defer srv.Close()
+	dst := filepath.Join(t.TempDir(), "a")
+	ctx := context.Background()
+	if err := DownloadFrom(ctx, []string{srv.URL + "/down", srv.URL + "/api"}, dst, want); err != nil {
+		t.Fatal(err)
+	}
+	if accept != "application/octet-stream" {
+		t.Errorf("Accept %q", accept)
+	}
+	err := DownloadFrom(ctx, []string{srv.URL + "/down", srv.URL + "/down"}, filepath.Join(t.TempDir(), "b"), want)
+	if err == nil || strings.Count(err.Error(), "504") != 2 {
+		t.Errorf("both addresses failing: %v; want both failures reported", err)
+	}
+}
+
 func TestParseContentRange(t *testing.T) {
 	for _, c := range []struct {
 		s                 string

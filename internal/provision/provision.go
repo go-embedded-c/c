@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,10 +35,12 @@ import (
 	"github.com/go-embedded-c/c/internal/oracle"
 )
 
-// Asset is a release archive and the sha256 GitHub publishes for it.
+// Asset is a release archive, the sha256 GitHub publishes for it, and its
+// REST API URL (the second address of the same file).
 type Asset struct {
 	Name   string
 	SHA256 string
+	APIURL string
 }
 
 // URL returns where the asset is served from.
@@ -49,9 +52,11 @@ func (a Asset) URL() string {
 func AssetFor(goos, goarch string) (Asset, error) {
 	switch goos + "/" + goarch {
 	case "darwin/arm64":
-		return Asset{"LLVM-23.1.4-macOS-ARM64.tar.zst", "0f8b0db925ab54a63028d788e85b14abaa25492e9608819728c17f6786948da4"}, nil
+		return Asset{"LLVM-23.1.4-macOS-ARM64.tar.zst", "0f8b0db925ab54a63028d788e85b14abaa25492e9608819728c17f6786948da4",
+			"https://api.github.com/repos/llvm/llvm-project/releases/assets/659320554"}, nil
 	case "linux/amd64":
-		return Asset{"LLVM-23.1.4-Linux-X64.tar.zst", "efdd1dbd089b99bfcfcde7b8eb1236163f2e88df5a981cca4f783ec9cb5e0378"}, nil
+		return Asset{"LLVM-23.1.4-Linux-X64.tar.zst", "efdd1dbd089b99bfcfcde7b8eb1236163f2e88df5a981cca4f783ec9cb5e0378",
+			"https://api.github.com/repos/llvm/llvm-project/releases/assets/659252374"}, nil
 	}
 	return Asset{}, fmt.Errorf("provision: no pinned LLVM %s release for %s/%s", oracle.ClangVersion, goos, goarch)
 }
@@ -95,6 +100,23 @@ var (
 	maxWait          = 30 * time.Second
 	maxArchive int64 = 8 << 30 // the LLVM archives are under 2 GiB
 )
+
+// DownloadFrom is Download from the first of urls that delivers the file.
+// GitHub serves a release asset at two addresses: github.com/…/releases/
+// download/…, whose front end answered 504 for hours on 2026-11-08 (for
+// wasi-sdk's asset even on 1 KiB ranges), and the REST API's asset URL,
+// which served the same file at the same time.
+func DownloadFrom(ctx context.Context, urls []string, dst, want string) error {
+	var errs []error
+	for _, u := range urls {
+		err := Download(ctx, u, dst, want)
+		if err == nil {
+			return nil
+		}
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
 
 // Download fetches url into dst and checks its sha256; a file already there
 // with the right sum is kept. A wrong sum deletes the file and is an error.
@@ -185,6 +207,9 @@ func fetchRangeOnce(ctx context.Context, url string, f *os.File, off int64) (int
 		return 0, 0, errPermanent{err}
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, off+chunkSize-1))
+	// The REST API's asset URL serves the bytes only when asked for them;
+	// the download URL ignores it.
+	req.Header.Set("Accept", "application/octet-stream")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, 0, err // the network: retried
@@ -321,14 +346,14 @@ func Install(ctx context.Context, o Options) error {
 		return err
 	}
 	archive := filepath.Join(o.Home, "dl", asset.Name)
-	url := asset.URL()
+	urls := []string{asset.URL(), asset.APIURL}
 	if o.BaseURL != "" {
-		url = o.BaseURL + "/" + asset.Name
+		urls = []string{o.BaseURL + "/" + asset.Name}
 	}
 	llvm := filepath.Join(o.Home, "llvm")
 	if !exists(clang) {
-		fmt.Fprintf(log, "provision: downloading %s\n", url)
-		if err := Download(ctx, url, archive, asset.SHA256); err != nil {
+		fmt.Fprintf(log, "provision: downloading %s\n", asset.Name)
+		if err := DownloadFrom(ctx, urls, archive, asset.SHA256); err != nil {
 			return err
 		}
 		fmt.Fprintln(log, "provision: extracting")
@@ -357,13 +382,13 @@ func Install(ctx context.Context, o Options) error {
 	// here, pinned, through ranges.
 	builtins := filepath.Join(o.Home, "dl", "libclang_rt.builtins.a")
 	if !exists(builtins) {
-		burl := builtinsAsset.URL
+		burls := []string{builtinsAsset.URL, builtinsAsset.APIURL}
 		if o.BaseURL != "" {
-			burl = o.BaseURL + "/" + builtinsAsset.Name
+			burls = []string{o.BaseURL + "/" + builtinsAsset.Name}
 		}
 		tgz := filepath.Join(o.Home, "dl", builtinsAsset.Name)
-		fmt.Fprintf(log, "provision: downloading %s\n", burl)
-		if err := Download(ctx, burl, tgz, builtinsAsset.SHA256); err != nil {
+		fmt.Fprintf(log, "provision: downloading %s\n", builtinsAsset.Name)
+		if err := DownloadFrom(ctx, burls, tgz, builtinsAsset.SHA256); err != nil {
 			return err
 		}
 		if err := extractMember(tgz, builtinsAsset.Member, builtins); err != nil {
@@ -398,9 +423,10 @@ func Install(ctx context.Context, o Options) error {
 // case: HAVE_WASM_LIBCALL_THREAD_CONTEXT is empty). The sha256 is GitHub's
 // digest of the release asset, equal to the copy the earlier builds
 // fetched (checked 2026-11-08).
-var builtinsAsset = struct{ Name, URL, SHA256, Member string }{
+var builtinsAsset = struct{ Name, URL, APIURL, SHA256, Member string }{
 	Name:   "libclang_rt-34.0-rc.1.tar.gz",
 	URL:    "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34-rc.1/libclang_rt-34.0-rc.1.tar.gz",
+	APIURL: "https://api.github.com/repos/WebAssembly/wasi-sdk/releases/assets/463648626",
 	SHA256: "84da92d09e34bac7d39eb7f8075697b4f00bbccd0cfb6ce9654565ad6a7e2dfe",
 	Member: "wasm32-unknown-wasip2/libclang_rt.builtins.a",
 }
