@@ -14,6 +14,8 @@
 package provision
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -22,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -343,10 +346,29 @@ func Install(ctx context.Context, o Options) error {
 			}
 		}
 	}
+	// The compiler-rt builtins wasi-libc links against. Its cmake would
+	// download them itself, without a checksum and in one GET; fetch them
+	// here, pinned, through ranges.
+	builtins := filepath.Join(o.Home, "dl", "libclang_rt.builtins.a")
+	if !exists(builtins) {
+		burl := builtinsAsset.URL
+		if o.BaseURL != "" {
+			burl = o.BaseURL + "/" + builtinsAsset.Name
+		}
+		tgz := filepath.Join(o.Home, "dl", builtinsAsset.Name)
+		fmt.Fprintf(log, "provision: downloading %s\n", burl)
+		if err := Download(ctx, burl, tgz, builtinsAsset.SHA256); err != nil {
+			return err
+		}
+		if err := extractMember(tgz, builtinsAsset.Member, builtins); err != nil {
+			return err
+		}
+	}
 	build := filepath.Join(o.Home, "build")
 	bin := filepath.Join(llvm, "bin")
 	fmt.Fprintln(log, "provision: building the sysroot")
 	if err := run(ctx, log, o.Home, "cmake", "-S", src, "-B", build,
+		"-DBUILTINS_LIB="+builtins,
 		"-DCMAKE_C_COMPILER="+clang,
 		"-DCMAKE_AR="+filepath.Join(bin, "llvm-ar"),
 		"-DCMAKE_NM="+filepath.Join(bin, "llvm-nm"),
@@ -362,6 +384,65 @@ func Install(ctx context.Context, o Options) error {
 		return err
 	}
 	return installBuiltins(o.Home, llvm)
+}
+
+// builtinsAsset is the archive wasi-libc's cmake/builtins.cmake (at
+// oracle.WasiLibcCommit) downloads when BUILTINS_LIB is not set, and the
+// member it uses for a target without the libcall thread context (our
+// case: HAVE_WASM_LIBCALL_THREAD_CONTEXT is empty). The sha256 is GitHub's
+// digest of the release asset, equal to the copy the earlier builds
+// fetched (checked 2026-11-08).
+var builtinsAsset = struct{ Name, URL, SHA256, Member string }{
+	Name:   "libclang_rt-34.0-rc.1.tar.gz",
+	URL:    "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34-rc.1/libclang_rt-34.0-rc.1.tar.gz",
+	SHA256: "84da92d09e34bac7d39eb7f8075697b4f00bbccd0cfb6ce9654565ad6a7e2dfe",
+	Member: "wasm32-unknown-wasip2/libclang_rt.builtins.a",
+}
+
+// maxMember bounds the member extractMember writes.
+var maxMember int64 = 64 << 20
+
+// extractMember writes the regular file of a .tar.gz whose path ends with
+// member (after any top directory) to dst.
+func extractMember(archive, member, dst string) error {
+	f, err := os.Open(archive)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	zr, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("provision: %s: %w", archive, err)
+	}
+	tr := tar.NewReader(zr)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return fmt.Errorf("provision: %s has no %s", archive, member)
+		}
+		if err != nil {
+			return fmt.Errorf("provision: %s: %w", archive, err)
+		}
+		name := path.Clean(h.Name)
+		if h.Typeflag != tar.TypeReg || name != member && !strings.HasSuffix(name, "/"+member) {
+			continue
+		}
+		if h.Size < 0 || h.Size > maxMember {
+			return fmt.Errorf("provision: %s: %s is %d bytes, over %d", archive, member, h.Size, maxMember)
+		}
+		out, err := os.Create(dst)
+		if err != nil {
+			return err
+		}
+		_, err = io.CopyN(out, tr, h.Size)
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			os.Remove(dst)
+		}
+		return err
+	}
 }
 
 // installBuiltins copies the compiler-rt builtins that the wasi-libc build

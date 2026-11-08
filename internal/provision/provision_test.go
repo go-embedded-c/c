@@ -1,7 +1,9 @@
 package provision
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -142,6 +144,78 @@ func TestDownloadRanges(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "s")); err == nil {
 		t.Fatal("a failed download must leave no file")
+	}
+}
+
+func tgz(t *testing.T, files map[string]string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	for name, body := range files {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		tw.Write([]byte(body))
+	}
+	tw.Close()
+	zw.Close()
+	p := filepath.Join(t.TempDir(), "a.tar.gz")
+	if err := os.WriteFile(p, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestExtractMember(t *testing.T) {
+	const member = "wasm32-unknown-wasip2/libclang_rt.builtins.a"
+	a := tgz(t, map[string]string{
+		"top/wasm32-unknown-wasip1/libclang_rt.builtins.a": "p1",
+		"top/" + member: "p2",
+	})
+	dst := filepath.Join(t.TempDir(), "b.a")
+	if err := extractMember(a, member, dst); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(dst); string(b) != "p2" {
+		t.Fatalf("got %q, want the wasip2 member", b)
+	}
+	if err := extractMember(a, "wasm32-unknown-wasip3/libclang_rt.builtins.a", dst); err == nil {
+		t.Error("a missing member must be an error")
+	}
+	m := maxMember
+	maxMember = 1
+	t.Cleanup(func() { maxMember = m })
+	if err := extractMember(a, member, filepath.Join(t.TempDir(), "c.a")); err == nil {
+		t.Error("a member over the bound must be an error")
+	}
+	if err := extractMember(dst, member, filepath.Join(t.TempDir(), "d.a")); err == nil {
+		t.Error("a file that is not gzip must be an error")
+	}
+}
+
+// TestExtractMemberOfTheRealArchive: from the pinned archive, the member is
+// the file wasi-libc's cmake extracted itself in an earlier build of this
+// home, when there is one.
+func TestExtractMemberOfTheRealArchive(t *testing.T) {
+	home := os.Getenv("CORACLE_HOME")
+	src := filepath.Join(home, "build", "wasi-sdk-builtins-prefix", "src")
+	archive := filepath.Join(src, builtinsAsset.Name)
+	theirs := filepath.Join(src, "wasi-sdk-builtins", filepath.FromSlash(builtinsAsset.Member))
+	if home == "" || !exists(archive) || !exists(theirs) {
+		t.Skip("no earlier cmake download in CORACLE_HOME")
+	}
+	if got, err := FileSHA256(archive); err != nil || got != builtinsAsset.SHA256 {
+		t.Fatalf("archive sha256 %s, %v; want %s", got, err, builtinsAsset.SHA256)
+	}
+	ours := filepath.Join(t.TempDir(), "b.a")
+	if err := extractMember(archive, builtinsAsset.Member, ours); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := FileSHA256(ours)
+	b, _ := FileSHA256(theirs)
+	if a != b {
+		t.Fatalf("extracted %s, cmake's %s", a, b)
 	}
 }
 
