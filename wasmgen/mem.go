@@ -2,6 +2,7 @@ package wasmgen
 
 import (
 	"encoding/binary"
+	"fmt"
 	"strings"
 
 	"github.com/go-embedded-c/c/internal/cc"
@@ -192,8 +193,9 @@ func (m *module) staticAddr(e cc.ExpressionNode) (uint32, int64, error) {
 			}
 		}
 	case *cc.PostfixExpression:
-		// a[1] of char a[2][5]: an array, converted to its address.
-		if x.Case == cc.PostfixExpressionIndex && designatesArray(x) {
+		// a[1] of char a[2][5], (int[2]){1, 2}: an array, converted to
+		// its address.
+		if (x.Case == cc.PostfixExpressionIndex || x.Case == cc.PostfixExpressionComplit) && designatesArray(x) {
 			return m.staticLvalue(x)
 		}
 	case *cc.CastExpression:
@@ -240,6 +242,10 @@ func (m *module) staticLvalue(e cc.ExpressionNode) (uint32, int64, error) {
 			}
 		}
 	case *cc.PostfixExpression:
+		if x.Case == cc.PostfixExpressionComplit {
+			sym, err := m.staticComplit(x)
+			return sym, 0, err
+		}
 		if x.Case == cc.PostfixExpressionIndex {
 			k, ok := intValue(x.ExpressionList)
 			if ok {
@@ -393,6 +399,8 @@ func (g *fgen) addr(e cc.ExpressionNode) error {
 		}
 	case *cc.PostfixExpression:
 		switch x.Case {
+		case cc.PostfixExpressionComplit:
+			return g.complit(x)
 		case cc.PostfixExpressionSelect, cc.PostfixExpressionPSelect:
 			if f := x.Field(); f != nil && f.IsBitfield() {
 				// A bit-field has no address (C11 6.5.3.2p1); its value
@@ -420,6 +428,75 @@ func (g *fgen) addr(e cc.ExpressionNode) error {
 		}
 	}
 	return unsupported(e, "lvalue")
+}
+
+// complit pushes the address of a compound literal in a function (C11
+// 6.5.2.5): an object with automatic storage for the enclosing block, a
+// frame slot of its own, initialised each time the expression is
+// evaluated (p5, p16), the members it does not name zero (p7 via 6.7.9).
+func (g *fgen) complit(x *cc.PostfixExpression) error {
+	t := undecayed(x.Type()) // (int[2]){…} may be typed already decayed
+	if t.IsIncomplete() || t.Size() < 0 {
+		return unsupported(x, "compound literal of incomplete type")
+	}
+	if !storable(t) {
+		return unsupported(x, "compound literal of type "+typeName(t))
+	}
+	if !g.m.layoutOK(t) {
+		return unsupported(x, layoutRefusal)
+	}
+	if t.Size() > maxObject {
+		return unsupported(x, "compound literal larger than the limit")
+	}
+	slot, ok := g.complits[x]
+	if !ok {
+		slot = g.frameSlot(t.Size(), t.Align())
+		g.complits[x] = slot
+	}
+	g.slotAddress(slot)
+	g.constant(0, intScalar)
+	g.constant(t.Size(), intScalar)
+	g.op(0xfc, 11, 0) // memory.fill: what the list does not name is zero
+	for l := x.InitializerList; l != nil; l = l.InitializerList {
+		if err := g.localInit(l.Initializer, slot); err != nil {
+			return err
+		}
+	}
+	g.slotAddress(slot)
+	return nil
+}
+
+// staticComplit returns the symbol of a compound literal at file scope,
+// which has static storage duration (C11 6.5.2.5p5), in a segment of its
+// own named as clang names it (.compoundliteral.N).
+func (m *module) staticComplit(x *cc.PostfixExpression) (uint32, error) {
+	if ds, ok := m.complits[x]; ok {
+		return ds.sym, nil
+	}
+	t := undecayed(x.Type())
+	if t.IsIncomplete() || t.Size() < 0 {
+		return 0, unsupported(x, "compound literal of incomplete type")
+	}
+	if !storable(t) {
+		return 0, unsupported(x, "compound literal of type "+typeName(t))
+	}
+	if !m.layoutOK(t) {
+		return 0, unsupported(x, layoutRefusal)
+	}
+	if t.Size() > maxObject {
+		return 0, unsupported(x, "compound literal larger than the limit")
+	}
+	name := fmt.Sprintf(".compoundliteral.%d", len(m.complits))
+	idx := m.addSegment(wasm.Segment{Name: ".data." + name, Align: alignLog2(max(t.Align(), 1)), Init: make([]byte, t.Size())})
+	ds := &dataSym{defined: true, seg: idx}
+	ds.sym = m.symbol(wasm.Symbol{Kind: wasm.SymData, Flags: wasm.SymBindingLocal, Name: name, Index: uint32(idx), Size: uint32(t.Size())})
+	m.complits[x] = ds
+	for l := x.InitializerList; l != nil; l = l.InitializerList {
+		if err := m.initSegment(idx, l.Initializer); err != nil {
+			return 0, err
+		}
+	}
+	return ds.sym, nil
 }
 
 // memberAddr pushes the address of E.m or E->m (C11 6.5.2.3): the member's
@@ -580,6 +657,9 @@ func designatesArray(e cc.ExpressionNode) bool {
 			return ok && d.Type().Kind() == cc.Array
 		}
 	case *cc.PostfixExpression:
+		if x.Case == cc.PostfixExpressionComplit {
+			return undecayed(x.Type()).Kind() == cc.Array
+		}
 		if (x.Case == cc.PostfixExpressionSelect || x.Case == cc.PostfixExpressionPSelect) && x.Field() != nil {
 			return x.Field().Type().Kind() == cc.Array
 		}

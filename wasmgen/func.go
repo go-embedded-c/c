@@ -55,11 +55,12 @@ type fgen struct {
 	frameSize int64
 	slots     map[*cc.Declarator]int64 // objects in the frame, by offset
 	spilled   []spilledParam
-	refs      map[*cc.Declarator]uint32 // parameters passed by address: the local holding it
-	sig       sig                       // the function's lowered signature
-	name      string                    // the function's, for its static locals' symbols
-	variadic  bool                      // the function takes `...`
-	va        uint32                    // then, the parameter with its varargs buffer
+	refs      map[*cc.Declarator]uint32       // parameters passed by address: the local holding it
+	sig       sig                             // the function's lowered signature
+	name      string                          // the function's, for its static locals' symbols
+	complits  map[*cc.PostfixExpression]int64 // compound literals' frame slots
+	variadic  bool                            // the function takes `...`
+	va        uint32                          // then, the parameter with its varargs buffer
 }
 
 func (g *fgen) op(b ...byte) { g.cur.code = append(g.cur.code, b...) }
@@ -114,7 +115,7 @@ func (m *module) function(fd *cc.FunctionDefinition) error {
 	if !ok || f == nil {
 		return unsupported(d, "function definition of type "+typeName(d.Type()))
 	}
-	g := &fgen{m: m, fn: f.pos, name: d.Name(), vars: map[*cc.Declarator]uint32{}, void: f.result == nil, sig: f.sig,
+	g := &fgen{m: m, fn: f.pos, name: d.Name(), complits: map[*cc.PostfixExpression]int64{}, vars: map[*cc.Declarator]uint32{}, void: f.result == nil, sig: f.sig,
 		cases: map[*cc.LabeledStatement]*block{}, slots: map[*cc.Declarator]int64{}, refs: map[*cc.Declarator]uint32{}}
 	if !g.void {
 		g.result = *f.result

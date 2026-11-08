@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d, W5 and W6 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float` and `double`, and bit-fields. 1327 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d, W5 and W6 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float` and `double`, bit-fields and compound literals. 1350 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -242,6 +242,11 @@ W4c adds variadic functions:
 - An undeclared `printf` calls wasi-libc's `printf`, as under clang. So
   do `puts`, `putchar`, `malloc`, `free`, and the `mem*` and `str*`
   functions of `<string.h>` that cc/v4 declares as builtins.
+- Compound literals (C11 6.5.2.5):
+  - In a function, a literal gets a frame slot and is initialised each
+    time it is evaluated; what its list does not name is zero.
+  - At file scope, it gets a segment of its own (`.compoundliteral.N`).
+  - A literal of incomplete array type, `(int[]){…}`, is refused.
 - A function defined as `f()` and called with arguments gets them
   evaluated and dropped. That is what clang's wrapper does
   (`WebAssemblyFixFunctionBitcasts`).
@@ -301,12 +306,12 @@ Four tests check the generator:
   misaligning a `long long` in the varargs buffer, on the side that is
   ours.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-08, with the library builtins, 1327 files ran the same as under
-  clang (1250 after W6, 1160 after W5, 1049 after W4d, 1005 after W4c,
+  2026-11-08, with compound literals, 1350 files ran the same as under
+  clang (1327 with the library builtins, 1250 after W6, 1160 after W5, 1049 after W4d, 1005 after W4c,
   952 after W4b, 762 after W4a, 454 after W3, 10 after W2). The test holds
   that count as a floor and logs the refusals by cause, with three files
-  for each. `asm` statements, `goto` (W7) and lvalues not compiled yet are
-  now the most common. It also names each file clang refuses that we
+  for each. `asm` statements, `goto` (W7) and `__builtin_longjmp` are now
+  the most common. It also names each file clang refuses that we
   compile.
   - No other file differs. There are three known differences:
     - `shiftdi-2.c` comes from the oracle compiling with `-std=gnu89`,
