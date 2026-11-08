@@ -40,15 +40,19 @@ func TestUnsupported(t *testing.T) {
 		{"int main(void) { goto l; l: return 0; }", "jump JumpStatementGoto (W7)"},
 		{"int main(void) { int x = 1; switch (x) { case 1 ... 3: return 1; } return 0; }", "case range"},
 		{"int main(void) { int x = 1; return x ?: 2; }", "?: without a middle operand"},
-		{"double d; int main(void) { return 0; }", "file-scope object of type double"},
-		{"int g(int, ...); int main(void) { return g(1, 2.0); }", "variadic argument of type double"},
+		{"long double d; int main(void) { return 0; }", "file-scope object of type long double"},
+		{"int main(void) { double d = 1.5L; return d; }", "value of type long double"},
+		{"double d = 1.5L; int main(void) { return 0; }", "non-constant initializer"},
+		{"int g(int, ...); int main(void) { return g(1, 1.0L); }", "variadic argument of type long double"},
+		{"typedef float v4 __attribute__((vector_size(16))); float f(v4 *p) { v4 t = *p; return 0; } int main(void) { return 0; }", "local of type v4"},
+		{"typedef int v4 __attribute__((vector_size(16))); int main(void) { v4 a, b; return 0; }", "local of type v4"},
 		{"void f(int n) { struct S { int i[n]; int k; } s; } int main(void) { f(1); return 0; }", "local of type struct S {i array of int; k int}"},
 		{"int f(int n, void *p) { struct S { int i[n]; int k; } *s = p; return s->k; } int main(void) { return 0; }", "member of a structure with a variable-length array"},
 		{"int g(int n) { __builtin_va_start(n, n); return 0; } int main(void) { return g(1); }", "va_start outside a variadic function"},
 		{"struct S { int a: 3; }; int main(void) { struct S s; s.a = 1; return s.a; }", "bit-field member (W6)"},
 		{"struct S { short i: 12; char c: 1; }; int main(void) { struct S s = {341, 1}; return 0; }", "bit-field initializer (W6)"},
 		{"struct S { short i: 12; char c: 1; } s = {341, 1}; int main(void) { return 0; }", "bit-field initializer (W6)"},
-		{"struct S { double d; }; int main(void) { struct S s = {1}; return 0; }", "initializer of type double"},
+		{"struct S { long double d; }; int main(void) { struct S s = {1}; return 0; }", "initializer of type long double"},
 		{"int f(void); int (*fp)(void) = f; int main(void) { return 0; }", "address of a function (W4c)"},
 		{"int f(int n) { int a[n]; return 0; } int main(void) { return f(2); }", "variable-length array"},
 		{"int main(void) { return __builtin_clz(1); }", "builtin __builtin_clz"},
@@ -95,6 +99,7 @@ func TestCompileSeeds(t *testing.T) {
 
 var compileSeeds = []string{
 	"int main(void) { return 0; }",
+	"float f = 1.5f; double g(double d, float x) { return -d * x + (int)d; } int main(void) { double d = f; d /= 3; return g(d, 0.25f) < 1 && !d ? (unsigned)d : (long long)2.5e10; }",
 	"int main(void) { return 1 << 31; }",
 	"int main(void) { return (char)300; }",
 	"int main() { return sizeof(long long); }",
@@ -287,6 +292,11 @@ func TestAgainstClang(t *testing.T) {
 		"char a[3][2][5] = {{\"ab\", \"cd\"}, {\"ef\", \"gh\"}}; char (*p)[5] = &a[1][1]; char *q = a[1][1]; char (*r)[5] = &a[0][1];\nint main(void) { return (*p)[1] * 1000 + q[0] + (*r)[1] * 1000000; }",
 		// calls without a prototype, with more or fewer arguments (920501-1.c)
 		"int s[2]; int calls;\nx(){if(!s[0]){s[1+s[1]]=s[1];return 1;}}\ny(a, b) int a, b; { return a * 10 + b; }\nint t(int v) { calls++; return v; }\nmain(){s[0]=s[1]=0;if(x(t(0), t(1))!=1)abort();return calls * 100 + y(4, 2);}",
+		// W5: float and double, printed with %a so that every bit shows
+		"#include <stdio.h>\nint main(void) {\n float f = 1.1f; double d = 1.1; float g = d; double h = f;\n printf(\"%a %a %a %a\\n\", f, d, g, h);\n printf(\"%a %a %a %a\\n\", f * 3.0f, d / 3, f + d, f / 3);\n int i = d * 10; unsigned u = 3.9; long long ll = -2.5e10; unsigned long long ull = 1e19; signed char c = -3.7; unsigned short us = 65535.5;\n printf(\"%d %u %lld %llu %d %d\\n\", i, u, ll, ull, c, us);\n printf(\"%a %a %a %a\\n\", (double)-7, (float)4000000001u, (double)(1ULL << 63), (float)-9007199254740993LL);\n _Bool b = 0.5; _Bool z = -0.0;\n printf(\"%d %d %a %a %a\\n\", b, z, -0.0, -d, -(0.0f));\n return (f < d) + (g == f) * 2;\n}",
+		"#include <stdio.h>\nint main(void) { double z = 0, n = z / z, inf = 1 / z; int c = 0; if (n) c += 1; if (!n) c += 2; c += (n == n) * 4 + (n != n) * 8 + (n < 1) * 16 + (inf > 1e308) * 32 + (n ? 64 : 128) + (z == -z) * 256 + (n >= n || n <= n) * 512; printf(\"%f %f %d %d\\n\", inf, -inf, c, z && n); return 0; }",
+		"#include <stdio.h>\nstruct V { float x; }; struct W { double a, b; };\nfloat scale(float x, double k) { return x * k; }\nstruct V mkv(float x) { struct V v = {x}; return v; }\nstruct W mkw(double a) { struct W w = {a, a / 2}; return w; }\nstatic double tab[3] = {0.5, 1.0 / 3, 2e-310}; float gf = 1.0 / 3; int gi = 7.9; double gd = 'A'; float gff = 0.1f;\nint main(void) { double s = 0; int i; float f = 0; for (i = 0; i < 3; i++) s += tab[i]; f += 0.1f; f *= 3; f -= 1; f /= 7; f++; --f; printf(\"%a %a %a %a %d %a %a\\n\", s, f, scale(1.5f, 1.0 / 3), gf, gi, gd, gff); printf(\"%a %a %a %.17g\\n\", mkv(2.5f).x, mkw(3).b, mkw(1e300).a * 10, 0.1 + 0.2); return 0; }",
+		"#include <stdarg.h>\n#include <stdio.h>\ndouble avg(int n, ...) { va_list ap; double t = 0; int k = n; va_start(ap, n); while (k--) t += va_arg(ap, double); va_end(ap); return t / n; }\nint main(void) { float f = 0.75f; printf(\"%a %a %g\\n\", avg(3, 1.0, f, 2.5), avg(1, (double)3), 1e-5); return 0; }",
 		// W4d: static locals, main(argc, argv)
 		"int next(void) { static int n = 40; static int *p = &n; return (*p)++; }\nint other(void) { static int n; return n++; }\nint main(void) { int a = next(), b = next(), c = other(); { static char s[] = \"xy\"; s[0]++; c += s[0]; } return a * 1000 + b * 10 + c + other() * 100000; }",
 		"struct S { int a; long long b; }; struct S *get(void) { static struct S s = {1, 2}; s.a++; return &s; }\nint main(void) { get(); return get()->a * 10 + (int)get()->b; }",
@@ -347,6 +357,9 @@ int sumbig(struct Big b);
 struct E mke(void);
 long long vmix(int n, ...);
 int vnone(int n, ...);
+struct FV { float x; };
+double fmix(float a, double b, struct FV v, int n, ...);
+struct FV mkfv(float x);
 `
 
 const abiLib = `struct P mkp(int a, int b) { struct P p; p.a = a; p.b = b; return p; }
@@ -381,6 +394,16 @@ long long vmix(int n, ...) {
 	return t;
 }
 int vnone(int n, ...) { return n; }
+double fmix(float a, double b, struct FV v, int n, ...) {
+	va_list ap;
+	double t = a + b + v.x;
+	va_start(ap, n);
+	while (n-- > 0)
+		t = t * 2 + va_arg(ap, double);
+	va_end(ap);
+	return t;
+}
+struct FV mkfv(float x) { struct FV v; v.x = x * 2; return v; }
 `
 
 const abiMain = `void abort(void);
@@ -402,6 +425,10 @@ int main(void) {
 		if (vmix(6, 1, s, 2, 1LL << 40, 3, "A", 4, p, 1, (char)7, 5, l) !=
 			((((-2 * 3 + (1LL << 40)) * 3 + 'A') * 3 + 34) * 3 + 7) * 3 + (1LL << 35)) abort();
 		if (vnone(9) != 9) abort();
+	}
+	{
+		float q = 4.0f;
+		if (fmix(1.5f, 2.25, mkfv(0.25f), 2, 0.125, q) != ((1.5 + 2.25 + 0.5) * 2 + 0.125) * 2 + 4) abort();
 	}
 	return mkp(5, 6).b + mkl(9).v + mkbig(1).k[8] * 100;
 }

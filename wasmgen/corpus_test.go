@@ -16,7 +16,7 @@ import (
 // gccTortureFloor is how many gcc 15.2.0 gcc.c-torture/execute files we
 // compile, link and run with clang's exit status and output. A change of
 // the generator must not lower it.
-const gccTortureFloor = 1049 // W4d, measured 2026-11-08: 1049 same, 0 different, 2 known (W4c: 1005, W4b: 952, W4a: 762, W3: 454, W2: 10)
+const gccTortureFloor = 1160 // W5, measured 2026-11-08: 1160 same, 0 different, 3 known (W4d: 1049, W4c: 1005, W4b: 952, W4a: 762, W3: 454, W2: 10)
 
 // knownDifferent are files whose result differs from clang's for a reason
 // that is not the generator's, each examined. A file listed here that
@@ -33,6 +33,11 @@ var knownDifferent = map[string]string{
 	// 2026-11-08: four times 0xfff8f against four times 0xfffa5); both
 	// programs exit 0, and the four values agree within each program.
 	"return-addr.c": "prints the addresses of stack objects",
+	// (int)2147483648.0f is out of range, undefined (C11 6.3.1.4p1). We
+	// saturate to INT_MAX, as the trunc_sat clang emits at run time does
+	// and as the test expects; clang folds the constant conversion to
+	// another value and the test aborts.
+	"20031003-1.c": "out-of-range float to int conversion, folded by clang",
 }
 
 // TestCorpusGCCTorture runs the generator over the gcc torture suite and

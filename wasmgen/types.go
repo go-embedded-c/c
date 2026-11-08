@@ -14,8 +14,12 @@ type scalar struct {
 	bits   int
 	signed bool
 	isBool bool
-	ptr    bool  // a pointer: an unsigned 32-bit address
-	elem   int64 // for a pointer, the size of what it points to (1 for void, as GNU C)
+	// isFloat: float (f32) or double (f64); signed is set, so that the
+	// integer paths that pick an operation by signedness pick the
+	// signed, IEEE-compatible one where they do not know floats.
+	isFloat bool
+	ptr     bool  // a pointer: an unsigned 32-bit address
+	elem    int64 // for a pointer, the size of what it points to (1 for void, as GNU C)
 }
 
 // scalarOf returns the representation of t, or false when the generator
@@ -30,6 +34,15 @@ func scalarOf(t cc.Type) (scalar, bool) {
 			elem = 1
 		}
 		return scalar{vt: wasm.I32, bits: 32, ptr: true, elem: elem}, true
+	}
+	if t.VectorSize() > 0 {
+		// A GNU vector (vector_size): cc/v4 keeps the element's kind, so
+		// float __attribute__((vector_size(16))) would read as a float
+		// (gcc torture 20060420-1.c). Not a scalar.
+		return scalar{}, false
+	}
+	if s, ok := floatScalarOf(t); ok {
+		return s, true
 	}
 	if !cc.IsIntegerType(t) {
 		return scalar{}, false
@@ -235,6 +248,10 @@ const (
 // load returns the load opcode and alignment (log2) for s.
 func (s scalar) load() (op byte, align uint32) {
 	switch {
+	case s.vt == wasm.F32:
+		return opF32Load, 2
+	case s.vt == wasm.F64:
+		return opF64Load, 3
 	case s.vt == wasm.I64:
 		return opI64Load, 3
 	case s.bits == 8 && s.signed:
@@ -252,6 +269,10 @@ func (s scalar) load() (op byte, align uint32) {
 // store returns the store opcode and alignment (log2) for s.
 func (s scalar) store() (op byte, align uint32) {
 	switch {
+	case s.vt == wasm.F32:
+		return opF32Store, 2
+	case s.vt == wasm.F64:
+		return opF64Store, 3
 	case s.vt == wasm.I64:
 		return opI64Store, 3
 	case s.bits == 8:

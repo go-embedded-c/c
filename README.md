@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3 and W4a–W4d are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals and `main(argc, argv)`. 1049 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, and `float` and `double`. 1160 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -243,7 +243,7 @@ W4c adds variadic functions:
 - A function defined as `f()` and called with arguments gets them
   evaluated and dropped. That is what clang's wrapper does
   (`WebAssemblyFixFunctionBitcasts`).
-- `float` and `double` arguments wait for W5.
+- A `float` argument is promoted to `double`.
 
 W4d adds:
 
@@ -252,6 +252,17 @@ W4d adds:
 - `int main(int argc, char *argv[])`, defined as `__main_argc_argv`
   (BasicCABI.md, "User entrypoint"), which wasi-libc calls with the
   arguments.
+
+W5 adds `float` and `double`, as wasm's `f32` and `f64`. Every operation
+is the one clang emits at `-O0` (checked with `llvm-objdump`):
+
+- A conversion to an integer type saturates (`trunc_sat`).
+- A conversion to `_Bool`, `!x` and a controlling expression compare with
+  zero, so NaN is true.
+- Negation is `f.neg`, so `-(+0.0)` is `-0.0`.
+- A floating literal is rounded once, from its text, to its own type.
+- `long double` (binary128) is refused, and so are GNU vector types: they
+  were read as their element type before.
 
 The generator refuses anything else with an `*Unsupported` error that names
 the construct.
@@ -270,17 +281,20 @@ Four tests check the generator:
   misaligning a `long long` in the varargs buffer, on the side that is
   ours.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-08, after W4d, 1049 files ran the same as under clang (1005 after
-  W4c, 952 after W4b, 762 after W4a, 454 after W3, 10 after W2). The test
-  holds that count as a floor and logs the refusals by cause, with three
-  files for each. Bit-fields (W6), `asm` statements and `double` (W5) are
-  now the most common. It also names each file clang refuses that we
-  compile.
-  - No other file differs. There are two known differences:
+  2026-11-08, after W5, 1160 files ran the same as under clang (1049 after
+  W4d, 1005 after W4c, 952 after W4b, 762 after W4a, 454 after W3, 10 after
+  W2). The test holds that count as a floor and logs the refusals by
+  cause, with three files for each. Bit-fields (W6), `asm` statements and
+  `goto` (W7) are now the most common. It also names each file clang
+  refuses that we compile.
+  - No other file differs. There are three known differences:
     - `shiftdi-2.c` comes from the oracle compiling with `-std=gnu89`,
       where a large decimal constant has another type (#20);
     - `return-addr.c` prints addresses of locals, which depend on the
-      frame layout.
+      frame layout;
+    - `20031003-1.c` converts an out-of-range `float` to `int`, which is
+      undefined. We saturate, as the test expects; clang folds the
+      constant to another value.
   - A known difference that disappears makes the test fail, so the list
     stays true.
 - `FuzzCompile` checks that the generator never panics and that every
