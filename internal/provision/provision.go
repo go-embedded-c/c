@@ -86,10 +86,14 @@ func FileSHA256(path string) (string, error) {
 // same file (2026-11-08), so the archive is fetched in ranges, each retried.
 // The sha256 check at the end is what guarantees the bytes.
 var (
-	chunkSize  int64 = 64 << 20
-	attempts         = 5
-	retryWait        = 2 * time.Second // times the attempt number
-	maxArchive int64 = 8 << 30         // the LLVM archives are under 2 GiB
+	chunkSize int64 = 64 << 20
+	// The CDN also fails some ranges, for a while (run 42470580768: five
+	// attempts over 31 s were not enough): the wait doubles from retryWait
+	// up to maxWait, about four minutes over the attempts of one range.
+	attempts         = 10
+	retryWait        = time.Second
+	maxWait          = 30 * time.Second
+	maxArchive int64 = 8 << 30 // the LLVM archives are under 2 GiB
 )
 
 // Download fetches url into dst and checks its sha256; a file already there
@@ -153,13 +157,15 @@ type errPermanent struct{ error }
 // whole file from offset 0.
 func fetchRange(ctx context.Context, url string, f *os.File, off int64) (int64, int64, error) {
 	var err error
+	wait := retryWait
 	for i := range attempts {
 		if i > 0 {
 			select {
 			case <-ctx.Done():
 				return 0, 0, ctx.Err()
-			case <-time.After(time.Duration(i) * retryWait):
+			case <-time.After(wait):
 			}
+			wait = min(2*wait, maxWait)
 		}
 		var n, size int64
 		n, size, err = fetchRangeOnce(ctx, url, f, off)
@@ -170,7 +176,7 @@ func fetchRange(ctx context.Context, url string, f *os.File, off int64) (int64, 
 			return 0, 0, p.error
 		}
 	}
-	return 0, 0, err
+	return 0, 0, fmt.Errorf("%w (offset %d, %d attempts)", err, off, attempts)
 }
 
 func fetchRangeOnce(ctx context.Context, url string, f *os.File, off int64) (int64, int64, error) {
