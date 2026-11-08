@@ -137,6 +137,19 @@ func (g *fgen) rvalue(e cc.ExpressionNode) (scalar, error) {
 	if !ok {
 		return scalar{}, unsupported(e, "value of type "+typeName(t))
 	}
+	if u, ok := e.(*cc.UnaryExpression); ok && (u.Case == cc.UnaryExpressionSizeofExpr || u.Case == cc.UnaryExpressionSizeofType) {
+		// sizeof of a variable-length type is computed at run time (C11
+		// 6.5.3.4p2); cc/v4 folds it to a constant (20040423-1.c).
+		var t cc.Type
+		if u.Case == cc.UnaryExpressionSizeofType {
+			t = u.TypeName.Type()
+		} else {
+			t = undecayed(u.UnaryExpression.Type())
+		}
+		if hasVLA(t) {
+			return s, unsupported(u, "sizeof of a variable-length type")
+		}
+	}
 	if v, ok := intValue(e); ok && e.Pure() {
 		g.constant(v, s)
 		return s, nil

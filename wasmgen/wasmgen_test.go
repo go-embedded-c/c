@@ -37,7 +37,10 @@ func TestUnsupported(t *testing.T) {
 	for _, tc := range []struct{ src, what string }{
 		{"int main(int c, char **v, char **e) { return 0; }", "main with parameters other than (int, char **)"},
 		{"int main(void) { return __func__[0]; }", "static local __func__"},
-		{"int main(void) { goto l; l: return 0; }", "jump JumpStatementGoto (W7)"},
+		{"int main(void) { void *p = 0; goto *p; return 0; }", "computed goto"},
+		{"int f(int i) { typedef struct { int c[i + 2]; } c; return sizeof(c) * 3; } int main(void) { return f(1); }", "variable-length type"},
+		{"int f(int i) { return sizeof(int[i]); } int main(void) { return f(1); }", "sizeof of a variable-length type"},
+		{"int f(int x) { int i = 0; if (x) goto in; while (i < 10) { i += 2; in: i++; } return i; } int main(void) { return f(1); }", "irreducible control flow (W7)"},
 		{"int main(void) { int x = 1; switch (x) { case 1 ... 3: return 1; } return 0; }", "case range"},
 		{"int main(void) { int x = 1; return x ?: 2; }", "?: without a middle operand"},
 		{"long double d; int main(void) { return 0; }", "file-scope object of type long double"},
@@ -292,6 +295,8 @@ func TestAgainstClang(t *testing.T) {
 		"char a[3][2][5] = {{\"ab\", \"cd\"}, {\"ef\", \"gh\"}}; char (*p)[5] = &a[1][1]; char *q = a[1][1]; char (*r)[5] = &a[0][1];\nint main(void) { return (*p)[1] * 1000 + q[0] + (*r)[1] * 1000000; }",
 		// calls without a prototype, with more or fewer arguments (920501-1.c)
 		"int s[2]; int calls;\nx(){if(!s[0]){s[1+s[1]]=s[1];return 1;}}\ny(a, b) int a, b; { return a * 10 + b; }\nint t(int v) { calls++; return v; }\nmain(){s[0]=s[1]=0;if(x(t(0), t(1))!=1)abort();return calls * 100 + y(4, 2);}",
+		// W7: goto
+		"int f(int n) { int i = 0, s = 0; again: if (i >= n) goto done; s += i * i; i++; goto again; done: return s; }\nint g(int a) { int i, j, k = 0; for (i = 0; i < 10; i++) for (j = 0; j < 10; j++) { k += i ^ j; if (k > a) goto out; } return -1; out: return i * 100 + j; }\nint h(int x) { switch (x) { case 0: goto two; case 1: x += 10; two: x *= 3; break; default: goto end; } x++; end: return x; }\nint main(void) { return f(10) + g(150) * 1000 + h(0) + h(1) * 10 + h(5) * 100; }",
 		// compound literals (20000722-1.c, 20010123-1.c), in a function and
 		// at file scope
 		"struct s { char *p; int t; }; int calls;\nvoid foo(struct s *p) { calls = calls * 10 + p->t; p->t = 2; }\nvoid bar(void) { foo(&(struct s){\"hi\", 1}); }\nstruct s *gp = &(struct s){\"gl\", 7}; int *ga = (int[3]){4, 5, 6};\nint main(void) { int i, k = 0; bar(); bar(); for (i = 0; i < 3; i++) { int *q = (int[2]){i, i * 2}; struct s *t = &(struct s){.t = 3}; k = k * 10 + q[1] + t->t + (t->p == 0); t->t = 9; t->p = \"x\"; } return calls + k * 100 + gp->t * 1000000 + ga[2] * 10000000 + (int){3} + gp->p[1] + ((struct s){0, 8}).t; }",
