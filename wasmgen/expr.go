@@ -50,6 +50,10 @@ func convertConst(v int64, s scalar) int64 {
 }
 
 func (g *fgen) constant(v int64, s scalar) {
+	if s.isFloat {
+		g.constF(float64(v), s)
+		return
+	}
 	v = convertConst(v, s)
 	if s.vt == wasm.I64 {
 		g.op(opI64Const)
@@ -79,6 +83,9 @@ func (g *fgen) normalize(s scalar) {
 
 // convert converts the value on the stack from from to to.
 func (g *fgen) convert(from, to scalar) {
+	if g.convertFloat(from, to) {
+		return
+	}
 	switch {
 	case to.isBool:
 		if from.isBool {
@@ -146,6 +153,13 @@ func (g *fgen) rvalue(e cc.ExpressionNode) (scalar, error) {
 			return s, nil
 		case cc.PrimaryExpressionIdent:
 			return s, g.load(x)
+		case cc.PrimaryExpressionFloat:
+			v, ok := floatLiteral(x)
+			if !ok || !s.isFloat {
+				return s, unsupported(x, "floating constant "+x.Token.SrcStr())
+			}
+			g.constF(v, s)
+			return s, nil
 		}
 		return s, unsupported(x, "primary expression "+x.Case.String())
 	case *cc.ExpressionList:
@@ -349,6 +363,9 @@ func typeName(t cc.Type) string {
 
 // i64 maps an i32 binary opcode (add .. shr_u) to its i64 counterpart.
 func opFor(op byte, s scalar) byte {
+	if s.isFloat {
+		return floatOp(op, s)
+	}
 	if s.vt == wasm.I64 {
 		return op + i64Delta
 	}
@@ -402,6 +419,10 @@ func (g *fgen) compare(a, b cc.ExpressionNode, signed, unsigned byte) error {
 		g.convert(from, common)
 	}
 	op := pick(common.signed, signed, unsigned)
+	if common.isFloat {
+		g.op(floatRel(op, common))
+		return nil
+	}
 	if common.vt == wasm.I64 {
 		op += i64CompareDelta
 	}
@@ -422,6 +443,16 @@ func (g *fgen) unary(x *cc.UnaryExpression, s scalar) error {
 		g.convert(from, s)
 		return nil
 	case cc.UnaryExpressionMinus:
+		if s.isFloat {
+			// f.neg flips the sign: -(+0.0) is -0.0, which 0 - x is not.
+			from, err := g.rvalue(x.CastExpression)
+			if err != nil {
+				return err
+			}
+			g.convert(from, s)
+			g.op(pick(s.vt == wasm.F32, opF32Neg, opF64Neg))
+			return nil
+		}
 		g.zero(s)
 		from, err := g.rvalue(x.CastExpression)
 		if err != nil {
@@ -446,9 +477,13 @@ func (g *fgen) unary(x *cc.UnaryExpression, s scalar) error {
 		if err != nil {
 			return err
 		}
-		if from.vt == wasm.I64 {
+		switch {
+		case from.isFloat:
+			g.constF(0, from) // !x is x == 0 (C11 6.5.3.3p5): false for NaN
+			g.op(floatRel(opI32Eq, from))
+		case from.vt == wasm.I64:
 			g.op(opI64Eqz)
-		} else {
+		default:
 			g.op(opI32Eqz)
 		}
 		return nil

@@ -68,10 +68,29 @@ func (m *module) staticValue(e cc.ExpressionNode, t cc.Type, seg *wasm.Segment, 
 	if !ok {
 		return unsupported(e, "initializer of type "+typeName(t))
 	}
+	if s.isFloat {
+		v, ok := floatConst(e)
+		if !ok {
+			return unsupported(e, "non-constant initializer")
+		}
+		copy(seg.Init[off:], floatBytes(v, s))
+		return nil
+	}
 	if v, ok := intValue(e); ok {
 		b := binary.LittleEndian.AppendUint64(nil, uint64(convertConst(v, s)))
 		copy(seg.Init[off:], b[:s.bits/8])
 		return nil
+	}
+	if fs, ok := floatScalarOf(e.Type()); ok {
+		// int i = 2.5: toward zero (C11 6.3.1.4p1); out of range is
+		// undefined, and refused.
+		v, ok := floatConst(e)
+		if fs.isFloat && ok && v > -(1<<63) && v < 1<<63 {
+			b := binary.LittleEndian.AppendUint64(nil, uint64(convertConst(int64(v), s)))
+			copy(seg.Init[off:], b[:s.bits/8])
+			return nil
+		}
+		return unsupported(e, "non-constant initializer")
 	}
 	if s.bits != 32 {
 		return unsupported(e, "non-constant initializer")

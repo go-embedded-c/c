@@ -115,7 +115,11 @@ func promoted(e cc.ExpressionNode) (scalar, bool) {
 	if cc.IsIntegerType(t) {
 		t = cc.IntegerPromotion(t)
 	}
-	return scalarOf(t)
+	s, ok := scalarOf(t)
+	if ok && s.isFloat {
+		return f64Scalar, true // float is promoted to double
+	}
+	return s, ok
 }
 
 // vaIntrinsic compiles __builtin_va_start and __builtin_va_end, which

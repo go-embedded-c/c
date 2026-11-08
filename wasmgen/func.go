@@ -234,6 +234,10 @@ func (g *fgen) ret() {
 }
 
 func (g *fgen) zero(s scalar) {
+	if s.isFloat {
+		g.constF(0, s)
+		return
+	}
 	if s.vt == wasm.I64 {
 		g.op(opI64Const, 0)
 		return
@@ -288,7 +292,11 @@ func (g *fgen) condition(e cc.ExpressionNode) error {
 	if err != nil {
 		return err
 	}
-	if from.vt == wasm.I64 {
+	switch {
+	case from.isFloat:
+		g.constF(0, from) // compares unequal to 0: true for NaN
+		g.op(floatRel(opI32Ne, from))
+	case from.vt == wasm.I64:
 		g.op(opI64Eqz, opI32Eqz)
 	}
 	return nil
