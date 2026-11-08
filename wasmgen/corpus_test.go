@@ -53,6 +53,7 @@ func TestCorpusGCCTorture(t *testing.T) {
 	}
 	pass, frontRefused, differ := 0, 0, []string{}
 	causes := map[string]int{}
+	examples := map[string][]string{} // the first files of each cause
 	for _, p := range files {
 		src, err := os.ReadFile(p)
 		if err != nil {
@@ -67,6 +68,9 @@ func TestCorpusGCCTorture(t *testing.T) {
 		var u *wasmgen.Unsupported
 		if errors.As(err, &u) {
 			causes[u.What]++
+			if len(examples[u.What]) < 3 {
+				examples[u.What] = append(examples[u.What], filepath.Base(p))
+			}
 			continue
 		}
 		if err != nil {
@@ -119,7 +123,7 @@ func TestCorpusGCCTorture(t *testing.T) {
 		if i == 15 {
 			break
 		}
-		t.Logf("refused %4d  %s", c.v, c.k)
+		t.Logf("refused %4d  %s  (%s)", c.v, c.k, strings.Join(examples[c.k], ", "))
 	}
 	t.Logf("gcc torture: %d same as clang, %d different, %d refused by wasmgen, %d refused by the front end, of %d",
 		pass, len(differ), len(files)-pass-len(differ)-frontRefused, frontRefused, len(files))
