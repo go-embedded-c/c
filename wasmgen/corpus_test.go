@@ -16,7 +16,7 @@ import (
 // gccTortureFloor is how many gcc 15.2.0 gcc.c-torture/execute files we
 // compile, link and run with clang's exit status and output. A change of
 // the generator must not lower it.
-const gccTortureFloor = 952 // W4b, measured 2026-11-08: 952 same, 0 different, 1 known (W4a: 762, W3: 454, W2: 10)
+const gccTortureFloor = 1005 // W4c, measured 2026-11-08: 1005 same, 0 different, 2 known (W4b: 952, W4a: 762, W3: 454, W2: 10)
 
 // knownDifferent are files whose result differs from clang's for a reason
 // that is not the generator's, each examined. A file listed here that
@@ -28,6 +28,11 @@ var knownDifferent = map[string]string{
 	// and the test follow C99, where it is a long long. clang reports the
 	// b >> 28 mismatch and aborts; our program passes. go-embedded-c/c#20.
 	"shiftdi-2.c": "C89 vs C99 type of a decimal constant",
+	// The test prints four addresses of locals with %p. Our frame is laid
+	// out differently from clang's, so the addresses differ (measured
+	// 2026-11-08: four times 0xfff8f against four times 0xfffa5); both
+	// programs exit 0, and the four values agree within each program.
+	"return-addr.c": "prints the addresses of stack objects",
 }
 
 // TestCorpusGCCTorture runs the generator over the gcc torture suite and
@@ -48,6 +53,7 @@ func TestCorpusGCCTorture(t *testing.T) {
 	}
 	pass, frontRefused, differ := 0, 0, []string{}
 	causes := map[string]int{}
+	examples := map[string][]string{} // the first files of each cause
 	for _, p := range files {
 		src, err := os.ReadFile(p)
 		if err != nil {
@@ -62,6 +68,9 @@ func TestCorpusGCCTorture(t *testing.T) {
 		var u *wasmgen.Unsupported
 		if errors.As(err, &u) {
 			causes[u.What]++
+			if len(examples[u.What]) < 3 {
+				examples[u.What] = append(examples[u.What], filepath.Base(p))
+			}
 			continue
 		}
 		if err != nil {
@@ -80,7 +89,10 @@ func TestCorpusGCCTorture(t *testing.T) {
 		}
 		b, err := h.theirs(string(src))
 		if err != nil {
-			frontRefused++ // clang refuses it too
+			// We compiled it and clang did not: name it, so the count can be
+			// followed back to the files.
+			t.Logf("refused by clang, compiled by us: %s: %s", filepath.Base(p), firstLine(err.Error()))
+			frontRefused++
 			continue
 		}
 		name := filepath.Base(p)
@@ -94,6 +106,8 @@ func TestCorpusGCCTorture(t *testing.T) {
 			t.Logf("known difference: %s: %s", name, knownDifferent[name])
 		default:
 			differ = append(differ, name)
+			t.Logf("%s:\nours  exit %d trap %q stdout %q\nclang exit %d trap %q stdout %q",
+				name, a.Exit, a.Trap, a.Stdout, b.Exit, b.Trap, b.Stdout)
 		}
 	}
 	type kv struct {
@@ -109,7 +123,7 @@ func TestCorpusGCCTorture(t *testing.T) {
 		if i == 15 {
 			break
 		}
-		t.Logf("refused %4d  %s", c.v, c.k)
+		t.Logf("refused %4d  %s  (%s)", c.v, c.k, strings.Join(examples[c.k], ", "))
 	}
 	t.Logf("gcc torture: %d same as clang, %d different, %d refused by wasmgen, %d refused by the front end, of %d",
 		pass, len(differ), len(files)-pass-len(differ)-frontRefused, frontRefused, len(files))

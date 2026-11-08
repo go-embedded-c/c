@@ -25,7 +25,7 @@ func scalarOf(t cc.Type) (scalar, bool) {
 		return scalar{}, false
 	}
 	if p, ok := t.(*cc.PointerType); ok {
-		elem := p.Elem().Size()
+		elem := undecayed(p.Elem()).Size()
 		if elem <= 0 || isVoid(p.Elem()) {
 			elem = 1
 		}
@@ -45,6 +45,45 @@ func scalarOf(t cc.Type) (scalar, bool) {
 		return scalar{}, false // __int128
 	}
 	return s, true
+}
+
+// undecayed returns the array a type cc/v4 already decayed stands for, or t.
+// cc/v4 types an array operand as the pointer it decays to, even under &:
+// &a[0][0] of char a[2][2][5] is typed as a pointer to char *, not to
+// char[5], and steps by 4 instead of 5 (gcc torture strlen-4.c). The
+// decayed pointer keeps the array as its Undecay; any other pointer's
+// Undecay is itself.
+func undecayed(t cc.Type) cc.Type {
+	if p, ok := t.(*cc.PointerType); ok {
+		if a, ok := p.Undecay().(*cc.ArrayType); ok {
+			return a
+		}
+	}
+	return t
+}
+
+// hasVLA reports whether the structure or union t has a variable-length
+// array member, a GNU extension clang refuses ("will never be supported");
+// its layout is not static, so the generator refuses it too.
+func hasVLA(t cc.Type) bool {
+	var n int
+	var field func(int) *cc.Field
+	switch x := t.(type) {
+	case *cc.StructType:
+		n, field = x.NumFields(), x.FieldByIndex
+	case *cc.UnionType:
+		n, field = x.NumFields(), x.FieldByIndex
+	case *cc.ArrayType:
+		return x.IsVLA() || hasVLA(x.Elem())
+	default:
+		return false
+	}
+	for i := range n {
+		if f := field(i); f != nil && hasVLA(f.Type()) {
+			return true
+		}
+	}
+	return false
 }
 
 // isAggregate reports whether t is a struct or union.
@@ -73,7 +112,7 @@ func abiOf(t cc.Type) (passing, scalar, bool) {
 		s, ok := scalarOf(t)
 		return passDirect, s, ok
 	}
-	if t.IsIncomplete() {
+	if t.IsIncomplete() || hasVLA(t) {
 		return 0, scalar{}, false
 	}
 	if t.Size() == 0 {

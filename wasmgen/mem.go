@@ -159,6 +159,11 @@ func (m *module) staticAddr(e cc.ExpressionNode) (uint32, int64, error) {
 				return m.staticObject(x, d)
 			}
 		}
+	case *cc.PostfixExpression:
+		// a[1] of char a[2][5]: an array, converted to its address.
+		if x.Case == cc.PostfixExpressionIndex && designatesArray(x) {
+			return m.staticLvalue(x)
+		}
 	case *cc.CastExpression:
 		if s, ok := scalarOf(x.Type()); ok && s.bits == 32 {
 			return m.staticAddr(x.CastExpression)
@@ -206,8 +211,10 @@ func (m *module) staticLvalue(e cc.ExpressionNode) (uint32, int64, error) {
 		if x.Case == cc.PostfixExpressionIndex {
 			k, ok := intValue(x.ExpressionList)
 			if ok {
+				// The element's size from the indexed operand: x's own type
+				// may be the decayed pointer (see undecayed).
 				sym, addend, err := m.staticAddr(x.PostfixExpression)
-				return sym, addend + k*x.Type().Size(), err
+				return sym, addend + k*elemOf(x.PostfixExpression.Type()).Size(), err
 			}
 		}
 	case *cc.UnaryExpression:
@@ -342,6 +349,9 @@ func (g *fgen) addr(e cc.ExpressionNode) error {
 		}
 	case *cc.UnaryExpression:
 		if x.Case == cc.UnaryExpressionDeref {
+			if ap, t, ok := vaArgOf(x.CastExpression); ok {
+				return g.vaArg(x, ap, t)
+			}
 			return g.ptrValue(x.CastExpression)
 		}
 	case *cc.PostfixExpression:
@@ -355,6 +365,13 @@ func (g *fgen) addr(e cc.ExpressionNode) error {
 			}
 			if f.IsBitfield() {
 				return unsupported(x, "bit-field member (W6)")
+			}
+			base := x.PostfixExpression.Type()
+			if x.Case == cc.PostfixExpressionPSelect {
+				base = elemOf(base)
+			}
+			if hasVLA(base) {
+				return unsupported(x, "member of a structure with a variable-length array")
 			}
 			var err error
 			if x.Case == cc.PostfixExpressionSelect {
@@ -490,7 +507,7 @@ func (g *fgen) aggAssign(x *cc.AssignmentExpression, want bool) error {
 func elemOf(t cc.Type) cc.Type {
 	switch x := t.(type) {
 	case *cc.PointerType:
-		return x.Elem()
+		return undecayed(x.Elem())
 	case *cc.ArrayType:
 		return x.Elem()
 	}

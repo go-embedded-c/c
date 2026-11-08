@@ -861,11 +861,27 @@ func (g *fgen) callAgg(x *cc.PostfixExpression, slot *int64) error {
 	if s, ok := absBuiltins[strings.TrimPrefix(d.Name(), "__builtin_")]; ok && len(args) == 1 {
 		return g.abs(args[0], s)
 	}
+	if ok, err := g.vaIntrinsic(x, d.Name(), args); ok {
+		return err
+	}
 	f, err := g.calleeFor(x, d)
 	if err != nil {
 		return err
 	}
-	if len(f.params) != len(args) {
+	var extra []cc.ExpressionNode // evaluated for their effects only
+	if ft, ok := d.Type().(*cc.FunctionType); ok && unprototyped(ft) && len(f.params) == 0 && len(args) > 0 {
+		// `x(){…}` called as x(0): C leaves it undefined; clang calls a
+		// wrapper that drops the extra arguments (WebAssemblyFixFunction-
+		// Bitcasts.cpp, createWrapper). cc/v4 gives a K&R definition
+		// `f(a) int a;` its parameters, so only `()` gets here. For a
+		// function of another unit, the call's arguments are its signature,
+		// which is not done yet.
+		if !f.defined {
+			return unsupported(x, "call with arguments of a function declared without them in another unit")
+		}
+		args, extra = nil, args
+	}
+	if len(args) < len(f.params) || !f.variadic && len(args) != len(f.params) {
 		return unsupported(x, "call with a different number of arguments than parameters")
 	}
 	var result int64
@@ -874,7 +890,7 @@ func (g *fgen) callAgg(x *cc.PostfixExpression, slot *int64) error {
 		result = g.frameSlot(f.sret.Size(), f.sret.Align())
 		g.slotAddress(result)
 	}
-	for i, a := range args {
+	for i, a := range args[:len(f.params)] {
 		p := f.params[i]
 		switch {
 		case p.pass == passIgnored:
@@ -904,6 +920,16 @@ func (g *fgen) callAgg(x *cc.PostfixExpression, slot *int64) error {
 				return err
 			}
 			g.convert(from, p.s)
+		}
+	}
+	if f.variadic {
+		if err := g.varargs(args[len(f.params):]); err != nil {
+			return err
+		}
+	}
+	for _, a := range extra {
+		if err := g.effect(a); err != nil {
+			return err
 		}
 	}
 	g.op(opCall)
@@ -1007,10 +1033,15 @@ func (g *fgen) calleeFor(n cc.Node, d *cc.Declarator) (*funcSym, error) {
 		// declaration (`exit` to `__builtin_exit`); clang calls the
 		// library function. Other builtins are intrinsics, not calls.
 		lib, ok := strings.CutPrefix(name, "__builtin_")
-		if _, known := libc[lib]; !ok || !known {
+		_, known := libc[lib]
+		if !ok || !known && !libcAsDeclared[lib] {
 			return nil, unsupported(n, "builtin "+name)
 		}
 		name = lib
+	} else if strings.HasPrefix(name, "__builtin_") {
+		// A builtin cc/v4 does not declare (__builtin_return_address) is
+		// implicitly `int f()`; it is an intrinsic, not a library call.
+		return nil, unsupported(n, "builtin "+name)
 	}
 	if f := g.m.funcs[name]; f != nil {
 		return f, nil
@@ -1018,5 +1049,12 @@ func (g *fgen) calleeFor(n cc.Node, d *cc.Declarator) (*funcSym, error) {
 	if ps, ok := libc[name]; ok {
 		return g.m.importFunc(name, scalarSig(ps, nil)), nil
 	}
-	return g.m.callee(n, d)
+	return g.m.callee(n, name, d)
+}
+
+// libcAsDeclared are the library functions whose cc/v4 builtin declaration
+// has the signature of wasi-libc's definition, so that an undeclared call
+// goes to the library, as clang's does.
+var libcAsDeclared = map[string]bool{
+	"printf": true, // int printf(const char *, ...)
 }

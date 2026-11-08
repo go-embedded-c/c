@@ -80,6 +80,9 @@ type sig struct {
 	result *scalar // the direct result, nil for none
 	sret   cc.Type // the aggregate returned through a pointer, or nil
 	rtype  cc.Type // the C result type
+	// variadic: the arguments after params are stored in a buffer whose
+	// address is the last wasm parameter (BasicCABI.md, varargs).
+	variadic bool
 }
 
 type param struct {
@@ -100,6 +103,7 @@ func signature(n cc.Node, ft *cc.FunctionType) (sig, error) {
 	}
 	r := ft.Result()
 	sg.rtype = r
+	sg.variadic = ft.IsVariadic()
 	if isVoid(r) {
 		return sg, nil
 	}
@@ -135,6 +139,9 @@ func (m *module) wasmType(sg sig) uint32 {
 		if p.pass != passIgnored {
 			t.Params = append(t.Params, p.s.vt)
 		}
+	}
+	if sg.variadic {
+		t.Params = append(t.Params, wasm.I32)
 	}
 	r := sg.result
 	if r != nil {
@@ -258,9 +265,6 @@ func (m *module) declareFunction(fd *cc.FunctionDefinition) error {
 		// cc/v4 accepts `A{}` as a definition of A with the type int.
 		return unsupported(d, "function definition of type "+typeName(d.Type()))
 	}
-	if ft.IsVariadic() {
-		return unsupported(d, "variadic function definition")
-	}
 	sg, err := signature(d, ft)
 	if err != nil {
 		return err
@@ -286,24 +290,21 @@ func (m *module) declareFunction(fd *cc.FunctionDefinition) error {
 	return nil
 }
 
-// callee returns the symbol for a call of the function declared by d,
-// importing it when it is not defined in this unit.
-func (m *module) callee(n cc.Node, d *cc.Declarator) (*funcSym, error) {
-	if f := m.funcs[d.Name()]; f != nil {
+// callee returns the symbol for a call of name, declared by d, importing
+// it when it is not defined in this unit.
+func (m *module) callee(n cc.Node, name string, d *cc.Declarator) (*funcSym, error) {
+	if f := m.funcs[name]; f != nil {
 		return f, nil
 	}
 	ft, ok := d.Type().(*cc.FunctionType)
 	if !ok {
 		return nil, unsupported(n, "call of a non-function")
 	}
-	if ft.IsVariadic() {
-		return nil, unsupported(n, "call of a variadic function")
-	}
 	sg, err := signature(n, ft)
 	if err != nil {
 		return nil, err
 	}
-	return m.importFunc(d.Name(), sg), nil
+	return m.importFunc(name, sg), nil
 }
 
 // importFunc imports env.name with the given signature.
@@ -436,7 +437,7 @@ func storable(t cc.Type) bool {
 	}
 	// A structure or union is bytes; a member of a type the generator does
 	// not compile yet is refused where it is used.
-	return isAggregate(t) && !t.IsIncomplete() && t.Size() >= 0
+	return isAggregate(t) && !t.IsIncomplete() && t.Size() >= 0 && !hasVLA(t)
 }
 
 func alignLog2(n int) uint32 {

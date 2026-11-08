@@ -41,7 +41,10 @@ func TestUnsupported(t *testing.T) {
 		{"int main(void) { int x = 1; return x ?: 2; }", "?: without a middle operand"},
 		{"int main(void) { static int n; return n; }", "static local"},
 		{"double d; int main(void) { return 0; }", "file-scope object of type double"},
-		{"int g(int, ...); int main(void) { return g(1, 2); }", "call of a variadic function"},
+		{"int g(int, ...); int main(void) { return g(1, 2.0); }", "variadic argument of type double"},
+		{"void f(int n) { struct S { int i[n]; int k; } s; } int main(void) { f(1); return 0; }", "local of type struct S {i array of int; k int}"},
+		{"int f(int n, void *p) { struct S { int i[n]; int k; } *s = p; return s->k; } int main(void) { return 0; }", "member of a structure with a variable-length array"},
+		{"int g(int n) { __builtin_va_start(n, n); return 0; } int main(void) { return g(1); }", "va_start outside a variadic function"},
 		{"struct S { int a: 3; }; int main(void) { struct S s; s.a = 1; return s.a; }", "bit-field member (W6)"},
 		{"struct S { short i: 12; char c: 1; }; int main(void) { struct S s = {341, 1}; return 0; }", "bit-field initializer (W6)"},
 		{"struct S { short i: 12; char c: 1; } s = {341, 1}; int main(void) { return 0; }", "bit-field initializer (W6)"},
@@ -49,6 +52,8 @@ func TestUnsupported(t *testing.T) {
 		{"int f(void); int (*fp)(void) = f; int main(void) { return 0; }", "address of a function (W4c)"},
 		{"int f(int n) { int a[n]; return 0; } int main(void) { return f(2); }", "variable-length array"},
 		{"int main(void) { return __builtin_clz(1); }", "builtin __builtin_clz"},
+		{"int main(void) { return (int)__builtin_return_address(0); }", "builtin __builtin_return_address"},
+		{"int f(); int main(void) { return f(1); }", "call with arguments of a function declared without them in another unit"},
 	} {
 		_, err := compile(t, f, tc.src)
 		var u *wasmgen.Unsupported
@@ -68,6 +73,38 @@ func TestUnsupported(t *testing.T) {
 	}
 }
 
+// TestCompileSeeds: every seed of FuzzCompile reaches the generator and is
+// compiled. The fuzz target skips what the front end or the generator
+// refuses, so a seed that stopped compiling would protect nothing, silently.
+func TestCompileSeeds(t *testing.T) {
+	front, err := cparse.New("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range compileSeeds {
+		ast, err := front.Translate("t.c", []byte(s))
+		if err != nil {
+			t.Errorf("%q: front end: %v", s, err)
+			continue
+		}
+		if _, err := wasmgen.Compile(ast, "t.c"); err != nil {
+			t.Errorf("%q: %v", s, err)
+		}
+	}
+}
+
+var compileSeeds = []string{
+	"int main(void) { return 0; }",
+	"int main(void) { return 1 << 31; }",
+	"int main(void) { return (char)300; }",
+	"int main() { return sizeof(long long); }",
+	"int x; int main(void) { return x; }",
+	"unsigned char c = 200; long long f(short a, unsigned b) { return a * (long long)b; } int main(void) { c += f(-3, 7); return c++ + --c; }",
+	"void abort(void); static int s = -2; int main(void) { s <<= 3; exit(s); abort(); }",
+	"long long v(int n, ...) { __builtin_va_list ap; long long t = 0; __builtin_va_start(ap, n); while (n--) t += __builtin_va_arg(ap, long long); __builtin_va_end(ap); return t; } int main(void) { return v(2, 1LL, 2LL) + v(0); }",
+	"struct P { int a; long long b; } g = {1, 2}; union U { char c; } u; struct P f(struct P p, union U v) { p.a += v.c; return p; } int main(void) { struct P q = f(g, u), *r = &q; return (q = g).a + r->b; }",
+}
+
 // FuzzCompile: the generator is fed the AST of untrusted text. It may
 // refuse anything; it must not panic, and what it accepts is a valid module.
 func FuzzCompile(f *testing.F) {
@@ -75,16 +112,7 @@ func FuzzCompile(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
-	for _, s := range []string{
-		"int main(void) { return 0; }",
-		"int main(void) { return 1 << 31; }",
-		"int main(void) { return (char)300; }",
-		"int main() { return sizeof(long long); }",
-		"int x; int main(void) { return x; }",
-		"unsigned char c = 200; long long f(short a, unsigned b) { return a * (long long)b; } int main(void) { c += f(-3, 7); return c++ + --c; }",
-		"void abort(void); static int s = -2; int main(void) { s <<= 3; exit(s); abort(); }",
-		"struct P { int a; long long b; } g = {1, 2}; union U { char c; } u; struct P f(struct P p, union U v) { p.a += v.c; return p; } int main(void) { struct P q = f(g, u), *r = &q; return (q = g).a + r->b; }",
-	} {
+	for _, s := range compileSeeds {
 		f.Add([]byte(s))
 	}
 	ctx := context.Background()
@@ -254,6 +282,16 @@ func TestAgainstClang(t *testing.T) {
 		"struct n { int v; struct n *next; }; int main(void) { struct n c = {3, 0}, b = {2, &c}, a = {1, &b}; struct n *p; int t = 0; for (p = &a; p; p = p->next) t = t * 10 + p->v; return t; }",
 		"struct a { int k; union { int i; char c; }; struct { short s; }; }; int main(void) { struct a x; x.k = 1; x.i = 0x141; x.s = 7; return x.k + x.c * 10 + x.s * 1000 + sizeof x; }",
 		"struct m { const char *s; int n; } t[] = {{\"ab\", 1}, {\"cde\", 2}}; int main(void) { int i, r = 0; for (i = 0; i < 2; i++) r = r * 100 + t[i].s[t[i].n] * t[i].n; return r; }",
+		// pointers to arrays, which cc/v4 types already decayed (strlen-4.c)
+		"typedef char A5[5]; typedef A5 A2[2]; A2 a[2] = {{\"ab\", \"cd\"}, {\"ef\", \"gh\"}};\nint main(void) { return (*(&a[0][0] + 1))[1] * 100000 + (*&a[1][1])[1] * 1000 + ((char *)(&a[0][0] + 1) - (char *)a) * 10 + (int)sizeof(*&a[0][0]); }",
+		"char a[3][2][5] = {{\"ab\", \"cd\"}, {\"ef\", \"gh\"}}; char (*p)[5] = &a[1][1]; char *q = a[1][1]; char (*r)[5] = &a[0][1];\nint main(void) { return (*p)[1] * 1000 + q[0] + (*r)[1] * 1000000; }",
+		// calls without a prototype, with more or fewer arguments (920501-1.c)
+		"int s[2]; int calls;\nx(){if(!s[0]){s[1+s[1]]=s[1];return 1;}}\ny(a, b) int a, b; { return a * 10 + b; }\nint t(int v) { calls++; return v; }\nmain(){s[0]=s[1]=0;if(x(t(0), t(1))!=1)abort();return calls * 100 + y(4, 2);}",
+		// W4c: variadic functions
+		"#include <stdarg.h>\nint sum(int n, ...) { va_list ap; int t = 0; va_start(ap, n); while (n--) t += va_arg(ap, int); va_end(ap); return t; }\nint main(void) { return sum(4, 1, 2, 3, 40) * 10 + sum(0); }",
+		"#include <stdarg.h>\nint vsum(int n, va_list ap) { int t = 0; while (n--) t = t * 10 + va_arg(ap, int); return t; }\nint two(int n, ...) { va_list ap, aq; int a, b; va_start(ap, n); va_copy(aq, ap); a = vsum(n, ap); b = vsum(n, aq); va_end(aq); va_end(ap); return a + b * 1000; }\nint main(void) { return two(3, 1, 2, 3); }",
+		"#include <stdio.h>\nint main(void) { int n = printf(\"%d %s %lld %c|\\n\", 42, \"str\", -(1LL << 40), 'x'); return n; }",
+		"int main() { printf(\"%u-%hhd\\n\", 4000000000u, 300); return 0; }",
 	} {
 		h.check(src)
 	}
@@ -274,7 +312,8 @@ func TestAgainstClang(t *testing.T) {
 // BasicCABI.md passes a structure or union: indirect (P, C, W, Big), as a
 // singleton's scalar (L, N, U), or not at all (E, a GNU empty struct); W's
 // alignment, greater than its member's, makes it indirect.
-const abiHeader = `struct P { int a, b; };
+const abiHeader = `#include <stdarg.h>
+struct P { int a, b; };
 struct L { long long v; };
 struct N { struct { int x[1]; } in; };
 union U { short s; };
@@ -297,6 +336,8 @@ int getw(struct W w);
 struct Big mkbig(int s);
 int sumbig(struct Big b);
 struct E mke(void);
+long long vmix(int n, ...);
+int vnone(int n, ...);
 `
 
 const abiLib = `struct P mkp(int a, int b) { struct P p; p.a = a; p.b = b; return p; }
@@ -314,6 +355,23 @@ int getw(struct W w) { return w.v; }
 struct Big mkbig(int s) { struct Big b; int i; for (i = 0; i < 9; i++) b.k[i] = s + i; return b; }
 int sumbig(struct Big b) { int i, t = 0; for (i = 0; i < 9; i++) t += b.k[i] * (i + 1); b.k[0] = 99; return t; }
 struct E mke(void) { struct E e; return e; }
+long long vmix(int n, ...) {
+	va_list ap;
+	long long t = 0;
+	va_start(ap, n);
+	while (n-- > 0) {
+		switch (va_arg(ap, int)) {
+		case 1: t = t * 3 + va_arg(ap, int); break;
+		case 2: t = t * 3 + va_arg(ap, long long); break;
+		case 3: t = t * 3 + *va_arg(ap, char *); break;
+		case 4: { struct P p = va_arg(ap, struct P); t = t * 3 + p.a * 10 + p.b; break; }
+		case 5: t = t * 3 + va_arg(ap, struct L).v; break;
+		}
+	}
+	va_end(ap);
+	return t;
+}
+int vnone(int n, ...) { return n; }
 `
 
 const abiMain = `void abort(void);
@@ -329,6 +387,13 @@ int main(void) {
 	if (getc3(mkc(10), e, 1) != 10 + 33 + 60 + 1) abort();
 	if (getw(mkw(11)) != 11) abort();
 	if (sumbig(b) != 2 * 45 + 240 || b.k[0] != 2) abort();
+	{
+		struct L l = {1LL << 35};
+		short s = -2;
+		if (vmix(6, 1, s, 2, 1LL << 40, 3, "A", 4, p, 1, (char)7, 5, l) !=
+			((((-2 * 3 + (1LL << 40)) * 3 + 'A') * 3 + 34) * 3 + 7) * 3 + (1LL << 35)) abort();
+		if (vnone(9) != 9) abort();
+	}
 	return mkp(5, 6).b + mkl(9).v + mkbig(1).k[8] * 100;
 }
 `

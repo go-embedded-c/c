@@ -57,6 +57,8 @@ type fgen struct {
 	spilled   []spilledParam
 	refs      map[*cc.Declarator]uint32 // parameters passed by address: the local holding it
 	sig       sig                       // the function's lowered signature
+	variadic  bool                      // the function takes `...`
+	va        uint32                    // then, the parameter with its varargs buffer
 }
 
 func (g *fgen) op(b ...byte) { g.cur.code = append(g.cur.code, b...) }
@@ -128,6 +130,9 @@ func (m *module) function(fd *cc.FunctionDefinition) error {
 		}
 	}
 	g.nparams += idx
+	if f.variadic {
+		g.nparams++
+	}
 	// Every function has a frame on the linear stack: objects whose address
 	// is taken, arrays, aggregates, and the temporaries of calls live in it.
 	g.frame = true
@@ -157,6 +162,9 @@ func (m *module) function(fd *cc.FunctionDefinition) error {
 			}
 			idx++
 		}
+	}
+	if f.variadic {
+		g.va, g.variadic = idx, true // the address of the caller's buffer
 	}
 	g.cur = g.newBlock()
 	// The size expressions of a parameter declared as an array (int
