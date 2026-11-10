@@ -112,13 +112,16 @@ func (o *Object) Encode() []byte {
 	section++
 
 	memory := o.Memory || o.StackPointer || len(o.Segments) != 0
-	if memory || len(o.Imports) != 0 {
+	if memory || o.Table || len(o.Imports) != 0 {
 		var imp []byte
 		n := len(o.Imports)
 		if memory {
 			n++
 		}
 		if o.StackPointer {
+			n++
+		}
+		if o.Table {
 			n++
 		}
 		imp = AppendULEB(imp, uint64(n))
@@ -132,6 +135,11 @@ func (o *Object) Encode() []byte {
 			imp = appendName(imp, "env")
 			imp = appendName(imp, "__stack_pointer")
 			imp = append(imp, 0x03, byte(I32), 0x01) // global, i32, mutable
+		}
+		if o.Table {
+			imp = appendName(imp, "env")
+			imp = appendName(imp, "__indirect_function_table")
+			imp = append(imp, 0x01, 0x70, 0x00, 0x00) // table, funcref, limits min 0, no maximum
 		}
 		for _, i := range o.Imports {
 			imp = appendName(imp, "env")

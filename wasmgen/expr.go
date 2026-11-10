@@ -133,6 +133,10 @@ func (g *fgen) rvalue(e cc.ExpressionNode) (scalar, error) {
 		ps, _ := scalarOf(t) // already typed as the decayed pointer
 		return ps, g.addr(e)
 	}
+	if d := addressedFunction(e); d != nil {
+		// f or &f: a pointer to the function, its table index.
+		return scalar{vt: wasm.I32, bits: 32, ptr: true, elem: 1}, g.funcAddr(e, d)
+	}
 	s, ok := scalarOf(t)
 	if !ok {
 		return scalar{}, unsupported(e, "value of type "+typeName(t))
@@ -403,7 +407,7 @@ func (g *fgen) binary(a, b cc.ExpressionNode, s scalar, op byte) error {
 
 // compare pushes the int result of comparing a and b in their common type.
 func (g *fgen) compare(a, b cc.ExpressionNode, signed, unsigned byte) error {
-	if isPtrOrArray(a.Type()) || isPtrOrArray(b.Type()) {
+	if isPtrOrArray(a.Type()) || isPtrOrArray(b.Type()) || addressedFunction(a) != nil || addressedFunction(b) != nil {
 		// Pointers compare as unsigned addresses; a null pointer constant
 		// or another integer converts to an address (C11 6.5.8, 6.5.9).
 		for _, e := range []cc.ExpressionNode{a, b} {
@@ -503,8 +507,8 @@ func (g *fgen) unary(x *cc.UnaryExpression, s scalar) error {
 	case cc.UnaryExpressionInc, cc.UnaryExpressionDec:
 		return g.incdec(x, x.UnaryExpression, x.Case == cc.UnaryExpressionInc, false, true)
 	case cc.UnaryExpressionAddrof:
-		if x.CastExpression.Type().Kind() == cc.Function {
-			return unsupported(x, "address of a function (W4c)")
+		if d := functionDesignator(x.CastExpression); d != nil {
+			return g.funcAddr(x, d)
 		}
 		return g.addr(x.CastExpression)
 	case cc.UnaryExpressionDeref:
@@ -945,17 +949,13 @@ func (g *fgen) callAgg(x *cc.PostfixExpression, slot *int64) error {
 		}
 		break
 	}
-	p, ok := callee.(*cc.PrimaryExpression)
-	if !ok || p.Case != cc.PrimaryExpressionIdent {
-		return unsupported(x, "indirect call (W4)")
-	}
-	d, ok := p.ResolvedTo().(*cc.Declarator)
-	if !ok || d.Type().Kind() != cc.Function {
-		return unsupported(x, "call through a pointer (W4)")
-	}
 	var args []cc.ExpressionNode
 	for l := x.ArgumentExpressionList; l != nil; l = l.ArgumentExpressionList {
 		args = append(args, l.AssignmentExpression)
+	}
+	d := functionDesignator(callee)
+	if d == nil {
+		return g.indirectCall(x, callee, args, slot)
 	}
 	if s, ok := absBuiltins[strings.TrimPrefix(d.Name(), "__builtin_")]; ok && len(args) == 1 {
 		return g.abs(args[0], s)
@@ -980,6 +980,17 @@ func (g *fgen) callAgg(x *cc.PostfixExpression, slot *int64) error {
 		}
 		args, extra = nil, args
 	}
+	return g.emitCall(x, &f.sig, args, extra, slot, func() {
+		g.op(opCall)
+		g.cur.calls = append(g.cur.calls, callSite{offset: uint32(len(g.cur.code)), callee: f})
+		g.reloc(wasm.RelocFunctionIndexLEB, f.sym)
+	})
+}
+
+// emitCall compiles the arguments of a call of signature f, the call itself
+// (emit), and the use of its result. extra arguments are evaluated for their
+// effects only.
+func (g *fgen) emitCall(x *cc.PostfixExpression, f *sig, args, extra []cc.ExpressionNode, slot *int64, emit func()) error {
 	if len(args) < len(f.params) || !f.variadic && len(args) != len(f.params) {
 		return unsupported(x, "call with a different number of arguments than parameters")
 	}
@@ -1031,9 +1042,7 @@ func (g *fgen) callAgg(x *cc.PostfixExpression, slot *int64) error {
 			return err
 		}
 	}
-	g.op(opCall)
-	g.cur.calls = append(g.cur.calls, callSite{offset: uint32(len(g.cur.code)), callee: f})
-	g.reloc(wasm.RelocFunctionIndexLEB, f.sym)
+	emit()
 	if isAggregate(f.rtype) {
 		if f.result != nil {
 			// A singleton result: store it to memory, to give it an address.

@@ -56,7 +56,7 @@ func TestUnsupported(t *testing.T) {
 		{"int x; struct S { int a: 3; } s = {x}; int main(void) { return 0; }", "non-constant bit-field initializer"},
 		{"struct S { unsigned long long f:44; _Bool g:1; short h; }; int main(void) { struct S s; s.h = 1; return s.h; }", "bit-field layout that cc/v4 computes otherwise than clang"},
 		{"struct S { long double d; }; int main(void) { struct S s = {1}; return 0; }", "initializer of type long double"},
-		{"int f(void); int (*fp)(void) = f; int main(void) { return 0; }", "address of a function (W4c)"},
+		{"int f(); int g(int (*p)()) { return p(1); } int main(void) { return 0; }", "call through a pointer to a function without a prototype"},
 		{"int f(int n) { int a[n]; return 0; } int main(void) { return f(2); }", "variable-length array"},
 		{"int main(void) { return __builtin_clz(1); }", "builtin __builtin_clz"},
 		{"int main(void) { return (int)__builtin_return_address(0); }", "builtin __builtin_return_address"},
@@ -295,6 +295,9 @@ func TestAgainstClang(t *testing.T) {
 		"char a[3][2][5] = {{\"ab\", \"cd\"}, {\"ef\", \"gh\"}}; char (*p)[5] = &a[1][1]; char *q = a[1][1]; char (*r)[5] = &a[0][1];\nint main(void) { return (*p)[1] * 1000 + q[0] + (*r)[1] * 1000000; }",
 		// calls without a prototype, with more or fewer arguments (920501-1.c)
 		"int s[2]; int calls;\nx(){if(!s[0]){s[1+s[1]]=s[1];return 1;}}\ny(a, b) int a, b; { return a * 10 + b; }\nint t(int v) { calls++; return v; }\nmain(){s[0]=s[1]=0;if(x(t(0), t(1))!=1)abort();return calls * 100 + y(4, 2);}",
+		// function pointers: in data, in locals, through structures, as
+		// arguments, compared, called through (*p) and p
+		"struct op { const char *name; int (*fn)(int, int); };\nstatic int add(int a, int b) { return a + b; } int mul(int a, int b) { return a * b; } long long big(long long x) { return x << 33; }\nstruct op ops[] = {{\"add\", add}, {\"mul\", &mul}}; int (*gp)(int, int) = mul; void *vp = (void *)add;\nint apply(int (*f)(int, int), int x) { return f(x, x + 1); }\nint main(void) { int (*p)(int, int) = add, i, t = 0; long long (*q)(long long) = big; for (i = 0; i < 2; i++) t = t * 100 + ops[i].fn(3, 4); t += (*p)(1, 2) * 10000 + apply(mul, 5) + apply(gp, 2) * 1000000; return t + (p == add) + (ops[1].fn == mul) * 2 + (vp == (void *)add) * 4 + (int)(q(1) >> 33) * 8 + (p != gp) * 16; }",
 		// W7: goto
 		"int f(int n) { int i = 0, s = 0; again: if (i >= n) goto done; s += i * i; i++; goto again; done: return s; }\nint g(int a) { int i, j, k = 0; for (i = 0; i < 10; i++) for (j = 0; j < 10; j++) { k += i ^ j; if (k > a) goto out; } return -1; out: return i * 100 + j; }\nint h(int x) { switch (x) { case 0: goto two; case 1: x += 10; two: x *= 3; break; default: goto end; } x++; end: return x; }\nint main(void) { return f(10) + g(150) * 1000 + h(0) + h(1) * 10 + h(5) * 100; }",
 		// compound literals (20000722-1.c, 20010123-1.c), in a function and
