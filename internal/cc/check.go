@@ -2452,7 +2452,11 @@ func (n *ParameterDeclaration) check(c *ctx) {
 			c.errors.add(errorf("%v: invalid specifier(s) for parameter: abc", n.Declarator.Position()))
 		}
 	case ParameterDeclarationAbstract: // DeclarationSpecifiers AbstractDeclarator
-		t := n.AbstractDeclarator.check(c, n.DeclarationSpecifiers.check(c, &isExtern, &isStatic, &isAtomic, &isThreadLocal, &isConst, &isVolatile, &isInline, &isRegister, &isAuto, &isNoreturn, &isRestrict, &alignas)).Decay()
+		t := n.AbstractDeclarator.check(c, n.DeclarationSpecifiers.check(c, &isExtern, &isStatic, &isAtomic, &isThreadLocal, &isConst, &isVolatile, &isInline, &isRegister, &isAuto, &isNoreturn, &isRestrict, &alignas))
+		if t == nil {
+			t = Invalid
+		}
+		t = t.Decay()
 		n.typ = t
 		if n.AbstractDeclarator != nil {
 			n.AbstractDeclarator.typ = t

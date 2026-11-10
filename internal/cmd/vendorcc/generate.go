@@ -182,6 +182,12 @@ var patches = []filePatch{
 	},
 	{
 		File: "check.go",
+		Why:  "an unnamed parameter of an invalid type (void f(int float)): DeclarationSpecifiers.check returns nil, and .Decay() on it panicked (FuzzSource, CI run 42491474333)",
+		Old:  "\t\tt := n.AbstractDeclarator.check(c, n.DeclarationSpecifiers.check(c, &isExtern, &isStatic, &isAtomic, &isThreadLocal, &isConst, &isVolatile, &isInline, &isRegister, &isAuto, &isNoreturn, &isRestrict, &alignas)).Decay()\n",
+		New:  "\t\tt := n.AbstractDeclarator.check(c, n.DeclarationSpecifiers.check(c, &isExtern, &isStatic, &isAtomic, &isThreadLocal, &isConst, &isVolatile, &isInline, &isRegister, &isAuto, &isNoreturn, &isRestrict, &alignas))\n\t\tif t == nil {\n\t\t\tt = Invalid\n\t\t}\n\t\tt = t.Decay()\n",
+	},
+	{
+		File: "check.go",
 		Why:  "GNU __alignof__ of an expression does not decay it, as sizeof does not: a function aligned(256) has alignment 256, not a pointer's (gcc torture align-3.c)",
 		Old:  "\t\tt := n.UnaryExpression.check(c, mode.add(decay))\n\t\tn.val, n.typ = UInt64Value(t.Align()), c.sizeT(n)\n",
 		New:  "\t\tt := n.UnaryExpression.check(c, mode).Undecay()\n\t\tn.val, n.typ = UInt64Value(t.Align()), c.sizeT(n)\n",

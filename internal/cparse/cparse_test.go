@@ -193,6 +193,13 @@ var formerPanics = []struct{ src, msg, control string }{
 	{"0={#,", "expected direct declarator", "int a[] = {0, 1};"},
 	{"\"\"\\", "not terminated", "char *s = \"\";"},
 	{"0\n\\", "unexpected", "int x = 0;\n"},
+	// An unnamed parameter of an invalid type: DeclarationSpecifiers.check
+	// returns nil, and .Decay() on it panicked (FuzzSource in CI,
+	// 2026-11-08, run 42491474333).
+	{"void f(int float) {}", "missed/failed type check", "void f(int) {}"},
+	{"void f(long char);", "missed/failed type check", "void f(long);"},
+	{"void f(int float x) {}", "missed/failed type check", "void f(int x) {}"},
+	{"int float y; int (*fp)(long char);", "missed/failed type check", "int y; int (*fp)(long);"},
 }
 
 // TestEmptyVariadicArguments: `M()` for `M(A,...)` gives A and __VA_ARGS__

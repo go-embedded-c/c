@@ -48,6 +48,7 @@ type fgen struct {
 	breaks    []*block // innermost last
 	continues []*block
 	cases     map[*cc.LabeledStatement]*block
+	labels    map[string]*block // goto targets, by name
 
 	// The linear-stack frame (mem.go), when the function needs one.
 	frame     bool
@@ -116,7 +117,7 @@ func (m *module) function(fd *cc.FunctionDefinition) error {
 		return unsupported(d, "function definition of type "+typeName(d.Type()))
 	}
 	g := &fgen{m: m, fn: f.pos, name: d.Name(), complits: map[*cc.PostfixExpression]int64{}, vars: map[*cc.Declarator]uint32{}, void: f.result == nil, sig: f.sig,
-		cases: map[*cc.LabeledStatement]*block{}, slots: map[*cc.Declarator]int64{}, refs: map[*cc.Declarator]uint32{}}
+		cases: map[*cc.LabeledStatement]*block{}, labels: map[string]*block{}, slots: map[*cc.Declarator]int64{}, refs: map[*cc.Declarator]uint32{}}
 	if !g.void {
 		g.result = *f.result
 	}
@@ -396,8 +397,14 @@ func (g *fgen) jumpStatement(j *cc.JumpStatement) error {
 		g.endJump(g.continues[len(g.continues)-1])
 		g.dead()
 		return nil
+	case cc.JumpStatementGoto:
+		// The graph takes the edge; structure() turns it into br, or
+		// refuses a graph it makes irreducible.
+		g.endJump(g.labelBlock(j.Token2.SrcStr()))
+		g.dead()
+		return nil
 	}
-	return unsupported(j, "jump "+j.Case.String()+" (W7)")
+	return unsupported(j, "computed goto")
 }
 
 func (g *fgen) selection(s *cc.SelectionStatement) error {
@@ -451,6 +458,9 @@ func (g *fgen) switchStatement(s *cc.SelectionStatement) error {
 	exit := g.newBlock()
 	target := exit
 	for _, l := range s.LabeledStatements() {
+		if l.Case == cc.LabeledStatementLabel {
+			continue // a goto target inside the switch, not a case
+		}
 		b := g.newBlock()
 		g.cases[l] = b
 		switch l.Case {
@@ -489,10 +499,25 @@ func (g *fgen) switchStatement(s *cc.SelectionStatement) error {
 	return nil
 }
 
+// labelBlock returns the block a label names: labels have function scope
+// (C11 6.2.1p3), and a goto may come before its label.
+func (g *fgen) labelBlock(name string) *block {
+	b, ok := g.labels[name]
+	if !ok {
+		b = g.newBlock()
+		g.labels[name] = b
+	}
+	return b
+}
+
 func (g *fgen) labeled(l *cc.LabeledStatement) error {
+	if l.Case == cc.LabeledStatementLabel {
+		g.jump(g.labelBlock(l.Token.SrcStr()))
+		return g.statement(l.Statement)
+	}
 	b, ok := g.cases[l]
 	if !ok {
-		return unsupported(l, "label (W7)")
+		return unsupported(l, "case label outside a switch")
 	}
 	g.jump(b) // falling through from the previous case
 	return g.statement(l.Statement)
@@ -586,6 +611,10 @@ func (g *fgen) localDeclaration(decl *cc.Declaration) error {
 		id := il.InitDeclarator
 		d := id.Declarator
 		switch {
+		case d.IsTypename() && hasVLA(d.Type()):
+			// Its size is a run-time value, which cc/v4 folds into
+			// constants wherever sizeof meets it (20040423-1.c).
+			return unsupported(d, "variable-length type")
 		case d.IsTypename(), d.Type().Kind() == cc.Function, d.IsExtern():
 			continue
 		case d.IsStatic():
