@@ -59,6 +59,19 @@ func (m *module) staticInit(in *cc.Initializer, seg *wasm.Segment) error {
 	return nil
 }
 
+// stripPointerCasts removes the casts to pointer types around e, as in
+// (void *)f.
+func stripPointerCasts(e cc.ExpressionNode) cc.ExpressionNode {
+	for {
+		e = strip(e)
+		c, ok := e.(*cc.CastExpression)
+		if !ok || c.Case != cc.CastExpressionCast || c.Type().Kind() != cc.Ptr {
+			return e
+		}
+		e = c.CastExpression
+	}
+}
+
 // bitfieldLeaf reports whether the initializer leaf in initializes a
 // bit-field: its bits share bytes with its neighbours, so a store of its
 // type would overwrite them (gcc torture 20230630-1.c).
@@ -89,6 +102,17 @@ func (m *module) staticValue(e cc.ExpressionNode, t cc.Type, seg *wasm.Segment, 
 		}
 		copy(seg.Init[off:], floatBytes(v, s))
 		return nil
+	}
+	if s.ptr {
+		if d := addressedFunction(stripPointerCasts(e)); d != nil {
+			// int (*p)(void) = f: the function's table index.
+			sym, err := m.staticFunc(e, d)
+			if err != nil {
+				return err
+			}
+			seg.Relocs = append(seg.Relocs, wasm.Reloc{Type: wasm.RelocTableIndexI32, Offset: uint32(off), Symbol: sym})
+			return nil
+		}
 	}
 	if v, ok := intValue(e); ok {
 		b := binary.LittleEndian.AppendUint64(nil, uint64(convertConst(v, s)))
@@ -266,7 +290,9 @@ func (m *module) staticLvalue(e cc.ExpressionNode) (uint32, int64, error) {
 // staticObject returns the symbol of a static object, file-scope or not.
 func (m *module) staticObject(n cc.Node, d *cc.Declarator) (uint32, int64, error) {
 	if d.Type().Kind() == cc.Function {
-		return 0, 0, unsupported(n, "address of a function (W4c)")
+		// A function's address is a table index, not a memory address:
+		// f + 1 or &f[0] as a constant is not one we compile.
+		return 0, 0, unsupported(n, "function address in an address constant")
 	}
 	if d.Linkage() == cc.None {
 		ds, ok := m.locals[d]

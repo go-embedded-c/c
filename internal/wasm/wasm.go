@@ -97,10 +97,14 @@ type RelocType byte
 // The relocation types used so far.
 const (
 	RelocFunctionIndexLEB RelocType = 0
+	RelocTableIndexSLEB   RelocType = 1
+	RelocTableIndexI32    RelocType = 2
 	RelocMemoryAddrLEB    RelocType = 3
 	RelocMemoryAddrSLEB   RelocType = 4
 	RelocMemoryAddrI32    RelocType = 5
+	RelocTypeIndexLEB     RelocType = 6 // Symbol is the type index
 	RelocGlobalIndexLEB   RelocType = 7
+	RelocTableNumberLEB   RelocType = 20 // Symbol is a SymTable
 )
 
 // hasAddend reports whether entries of type t carry an addend.
@@ -131,7 +135,10 @@ type Object struct {
 	Imports      []Import
 	Memory       bool
 	StackPointer bool
-	Funcs        []Func
-	Segments     []Segment
-	Symbols      []Symbol
+	// Table imports env.__indirect_function_table, a funcref table, the
+	// one a SymTable symbol with no other definition refers to.
+	Table    bool
+	Funcs    []Func
+	Segments []Segment
+	Symbols  []Symbol
 }

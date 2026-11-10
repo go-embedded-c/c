@@ -186,18 +186,19 @@ func isVoid(t cc.Type) bool { return t != nil && t.Kind() == cc.Void }
 
 // Opcodes (core spec, binary/instructions.html).
 const (
-	opUnreachable = 0x00
-	opDrop        = 0x1a
-	opSelect      = 0x1b
-	opReturn      = 0x0f
-	opCall        = 0x10
-	opLocalGet    = 0x20
-	opLocalSet    = 0x21
-	opLocalTee    = 0x22
-	opGlobalGet   = 0x23
-	opGlobalSet   = 0x24
-	opI32Const    = 0x41
-	opI64Const    = 0x42
+	opUnreachable  = 0x00
+	opDrop         = 0x1a
+	opSelect       = 0x1b
+	opReturn       = 0x0f
+	opCall         = 0x10
+	opCallIndirect = 0x11
+	opLocalGet     = 0x20
+	opLocalSet     = 0x21
+	opLocalTee     = 0x22
+	opGlobalGet    = 0x23
+	opGlobalSet    = 0x24
+	opI32Const     = 0x41
+	opI64Const     = 0x42
 
 	opI32Eqz = 0x45
 	opI32Eq  = 0x46

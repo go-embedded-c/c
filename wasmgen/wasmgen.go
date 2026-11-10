@@ -68,6 +68,7 @@ type module struct {
 	// String literal symbols by contents.
 	strings map[string]uint32
 	sp      uint32 // the __stack_pointer symbol, when imported
+	tbl     uint32 // the __indirect_function_table symbol, when imported
 
 	calls []callSite
 }
