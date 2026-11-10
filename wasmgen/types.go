@@ -29,6 +29,12 @@ func scalarOf(t cc.Type) (scalar, bool) {
 		return scalar{}, false
 	}
 	if p, ok := t.(*cc.PointerType); ok {
+		if hasVLA(undecayed(p.Elem())) {
+			// A pointer to a variable-length array steps by a size known
+			// at run time; cc/v4's is not it (pr22061-1.c, a parameter
+			// char a[2][N]: a[1] is a + N, which needs that size).
+			return scalar{}, false
+		}
 		elem := undecayed(p.Elem()).Size()
 		if elem <= 0 || isVoid(p.Elem()) {
 			elem = 1

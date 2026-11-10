@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float` and `double`, bit-fields, compound literals, `goto` and function pointers. 1404 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float` and `double`, bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts). 1440 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -300,6 +300,25 @@ Function pointers:
   arguments and in comparisons.
 - A call through a pointer to a function without a prototype is refused.
 
+GCC builtins that compute rather than call a library function compile to
+what clang 23.1.4 emits for wasm32:
+
+- `__builtin_alloca` moves `__stack_pointer` down by the size rounded up
+  to 16. The epilogue restores the value it had on entry, which frees the
+  memory when the function returns.
+- `__builtin_{add,sub,mul}_overflow`, at any operand and result width:
+  - the exact value is computed in 128 bits;
+  - the product of 64-bit operands goes through compiler-rt's
+    `__multi3`, as clang's does.
+
+  The `_p` forms are refused; clang does not know them.
+- `isunordered`, `isgreater` and the other quiet comparisons are computed
+  in the operands' common real type.
+- `clz`, `ctz` and `popcount` (plain, `l` and `ll`), `expect`, `prefetch`,
+  `unreachable` and `trap` are also supported.
+- A pointer to a variable-length array is refused. Its step is a size
+  known only at run time, and cc/v4's is not that size.
+
 W7 adds `goto`:
 
 - A label is a block of the graph and a `goto` is an edge to it. The
@@ -331,8 +350,8 @@ Four tests check the generator:
   misaligning a `long long` in the varargs buffer, on the side that is
   ours.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-10, with function pointers, 1404 files ran the same as under
-  clang (1381 after W7, 1350 with compound literals, 1327 with the library builtins, 1250 after W6, 1160
+  2026-11-10, with the computing builtins, 1440 files ran the same as under
+  clang (1404 with function pointers, 1381 after W7, 1350 with compound literals, 1327 with the library builtins, 1250 after W6, 1160
   after W5, 1049 after W4d, 1005 after W4c, 952 after W4b, 762 after W4a,
   454 after W3, 10 after W2). The test holds that count as a floor and
   logs the refusals by cause, with three files for each. `asm`

@@ -963,6 +963,9 @@ func (g *fgen) callAgg(x *cc.PostfixExpression, slot *int64) error {
 	if ok, err := g.vaIntrinsic(x, d.Name(), args); ok {
 		return err
 	}
+	if ok, err := g.builtin(x, d.Name(), args); ok {
+		return err
+	}
 	f, err := g.calleeFor(x, d)
 	if err != nil {
 		return err
