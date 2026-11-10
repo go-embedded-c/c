@@ -50,7 +50,7 @@ func TestUnsupported(t *testing.T) {
 		{"typedef float v4 __attribute__((vector_size(16))); float f(v4 *p) { v4 t = *p; return 0; } int main(void) { return 0; }", "local of type v4"},
 		{"typedef int v4 __attribute__((vector_size(16))); int main(void) { v4 a, b; return 0; }", "local of type v4"},
 		{"void f(int n) { struct S { int i[n]; int k; } s; } int main(void) { f(1); return 0; }", "local of type struct S {i array of int; k int}"},
-		{"int f(int n, void *p) { struct S { int i[n]; int k; } *s = p; return s->k; } int main(void) { return 0; }", "member of a structure with a variable-length array"},
+		{"int f(int n, void *p) { struct S { int i[n]; int k; } *s = p; return s->k; } int main(void) { return 0; }", "local of type pointer to struct S"},
 		{"int g(int n) { __builtin_va_start(n, n); return 0; } int main(void) { return g(1); }", "va_start outside a variadic function"},
 		{"struct S { long long a: 24; }; int main(void) { struct S s; s.a = 1; return s.a; }", "bit-field of a type wider than int, narrower than int"},
 		{"int x; struct S { int a: 3; } s = {x}; int main(void) { return 0; }", "non-constant bit-field initializer"},
@@ -58,7 +58,9 @@ func TestUnsupported(t *testing.T) {
 		{"struct S { long double d; }; int main(void) { struct S s = {1}; return 0; }", "initializer of type long double"},
 		{"int f(); int g(int (*p)()) { return p(1); } int main(void) { return 0; }", "call through a pointer to a function without a prototype"},
 		{"int f(int n) { int a[n]; return 0; } int main(void) { return f(2); }", "variable-length array"},
-		{"int main(void) { return __builtin_clz(1); }", "builtin __builtin_clz"},
+		{"int main(void) { return __builtin_bswap32(1); }", "builtin __builtin_bswap32"},
+		{"int main(void) { return __builtin_mul_overflow_p(1, 2, 0); }", "builtin __builtin_mul_overflow_p"},
+		{"int n = 2; void bar(char a[2][n]) { a[1][0] = 1; } int main(void) { return 0; }", "parameter of type pointer to array of char"},
 		{"int main(void) { return (int)__builtin_return_address(0); }", "builtin __builtin_return_address"},
 		{"int f(); int main(void) { return f(1); }", "call with arguments of a function declared without them in another unit"},
 	} {
@@ -329,6 +331,10 @@ func TestAgainstClang(t *testing.T) {
 		"#include <stdarg.h>\nint vsum(int n, va_list ap) { int t = 0; while (n--) t = t * 10 + va_arg(ap, int); return t; }\nint two(int n, ...) { va_list ap, aq; int a, b; va_start(ap, n); va_copy(aq, ap); a = vsum(n, ap); b = vsum(n, aq); va_end(aq); va_end(ap); return a + b * 1000; }\nint main(void) { return two(3, 1, 2, 3); }",
 		"#include <stdio.h>\nint main(void) { int n = printf(\"%d %s %lld %c|\\n\", 42, \"str\", -(1LL << 40), 'x'); return n; }",
 		"int main() { printf(\"%u-%hhd\\n\", 4000000000u, 300); return 0; }",
+		// builtins: alloca (5000 calls of 1000 bytes overflow the 1 MiB
+		// stack unless each return frees them), the overflow builtins at
+		// every width, the quiet comparisons, the bit counts
+		builtinsProgram,
 	} {
 		h.check(src)
 	}
@@ -344,6 +350,37 @@ func TestAgainstClang(t *testing.T) {
 		t.Error("control: the harness did not tell exit 3 from exit 4")
 	}
 }
+
+const builtinsProgram = `#include <stdio.h>
+#include <limits.h>
+int grow(int n) { char *p = __builtin_alloca(n); int i; for (i = 0; i < n; i++) p[i] = i; return p[n - 1]; }
+int deep(int n) { char *p = __builtin_alloca(n + 1); int r; p[n] = n; r = n ? deep(n - 1) : 0; return r + p[n]; }
+int main(void) {
+	long long ll; int i, j, k = 0; unsigned u; short s; unsigned char uc; unsigned long long ull;
+	double z = 0, n = z / z; float f = 1.5f;
+	for (j = 0; j < 3; j++) { char *q = __builtin_alloca(10 * j + 1); q[0] = j; k += q[0]; }
+	for (j = 0; j < 5000; j++) k += grow(1000) - 231;
+	printf("%d %d\n", deep(20), k);
+	printf("%d %d %d ", __builtin_add_overflow(INT_MAX, 1, &i), i, __builtin_add_overflow(-1, 1u, &u));
+	printf("%u %d %d\n", u, __builtin_sub_overflow(0u, 1, &i), i);
+	printf("%d %d %d %d ", __builtin_mul_overflow(1 << 20, 1 << 12, &i), i, __builtin_mul_overflow(-3, 4, &s), s);
+	printf("%d %u %d %u\n", __builtin_mul_overflow(200, 2, &uc), uc, __builtin_mul_overflow(4000000000u, 4000000000u, &u), u);
+	printf("%d %lld ", __builtin_mul_overflow(LLONG_MAX, 2LL, &ll), ll);
+	printf("%d %lld ", __builtin_mul_overflow(LLONG_MIN, -1LL, &ll), ll);
+	printf("%d %llu ", __builtin_mul_overflow(ULLONG_MAX, ULLONG_MAX, &ull), ull);
+	printf("%d %d\n", __builtin_mul_overflow(0xffffffffffULL, 3, &i), i);
+	printf("%d %lld ", __builtin_add_overflow(ULLONG_MAX, LLONG_MIN, &ll), ll);
+	printf("%d %llu ", __builtin_sub_overflow(0LL, LLONG_MIN, &ull), ull);
+	printf("%d %lld ", __builtin_sub_overflow(0LL, LLONG_MIN, &ll), ll);
+	printf("%d %llu\n", __builtin_mul_overflow(-1, ULLONG_MAX, &ull), ull);
+	printf("%d %d %d %d ", __builtin_isunordered(n, 1.0), __builtin_isunordered(f, 2.0), __builtin_isgreater(f, 1), __builtin_isless(n, 1.0));
+	printf("%d %d %d %d\n", __builtin_islessgreater(f, 1.5), __builtin_islessequal(f, 1.5), __builtin_isgreaterequal(n, n), __builtin_islessgreater(f, 2.0));
+	printf("%d %d %d %d %d %d\n", __builtin_clz(1), __builtin_ctz(8), __builtin_popcount(0xff0f), __builtin_clzll(1), __builtin_ctzll(1ULL << 40), __builtin_popcountl(-1L));
+	__builtin_prefetch(&k, 0, 3);
+	if (__builtin_expect(k == 12345, 0)) __builtin_unreachable();
+	return (int)__builtin_expect(k, 0) & 0x7f;
+}
+`
 
 // abiHeader declares, for TestABIAgainstClang, one function per way
 // BasicCABI.md passes a structure or union: indirect (P, C, W, Big), as a
