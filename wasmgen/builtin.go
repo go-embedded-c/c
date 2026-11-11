@@ -93,6 +93,25 @@ func (g *fgen) builtin(x *cc.PostfixExpression, name string, args []cc.Expressio
 			return true, err
 		}
 		return true, g.overflow(x, b, args)
+	case "fabs", "fabsf", "fabsl", "copysign", "copysignf", "copysignl":
+		return true, g.fabsCopysign(x, b, args)
+	case "inf", "inff", "infl", "huge_val", "huge_valf", "huge_vall", "nan", "nanf", "nanl":
+		return true, g.infNaN(x, b, args)
+	case "isinf", "isfinite", "isnan", "signbit":
+		if err := arity(1); err != nil {
+			return true, err
+		}
+		return true, g.classify(x, b, args[0])
+	case "ffs", "ffsl", "ffsll":
+		if err := arity(1); err != nil {
+			return true, err
+		}
+		return true, g.ffs(x, b, args[0])
+	case "bswap16", "bswap32", "bswap64":
+		if err := arity(1); err != nil {
+			return true, err
+		}
+		return true, g.bswap(x, b, args[0])
 	}
 	return false, nil
 }
