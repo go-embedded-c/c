@@ -1149,10 +1149,19 @@ func (g *fgen) calleeFor(n cc.Node, d *cc.Declarator) (*funcSym, error) {
 			return nil, unsupported(n, "builtin "+name)
 		}
 		name = lib
-	} else if strings.HasPrefix(name, "__builtin_") {
+	} else if lib, ok := strings.CutPrefix(name, "__builtin_"); ok {
 		// A builtin cc/v4 does not declare (__builtin_return_address) is
-		// implicitly `int f()`; it is an intrinsic, not a library call.
-		return nil, unsupported(n, "builtin "+name)
+		// implicitly `int f()`; it is an intrinsic, not a library call,
+		// unless it is one of the library functions below, which clang
+		// calls with the library's signature.
+		ls, ok := libcUndeclared[lib]
+		if !ok {
+			return nil, unsupported(n, "builtin "+name)
+		}
+		if f := g.m.funcs[lib]; f != nil {
+			return f, nil
+		}
+		return g.m.importFunc(lib, ls), nil
 	}
 	if f := g.m.funcs[name]; f != nil {
 		return f, nil
@@ -1177,4 +1186,22 @@ var libcAsDeclared = map[string]bool{
 	"strlen": true, "strcmp": true, "strncmp": true, "strcpy": true, "strncpy": true,
 	"strcat": true, "strncat": true, "strchr": true, "strrchr": true, "strstr": true,
 	"strpbrk": true, "strspn": true, "strcspn": true,
+	// The stream is void * in cc/v4's declaration, FILE * in wasi-libc's:
+	// both an i32. Not fputs: clang 23.1.4 does not know __builtin_fputs.
+	"fprintf": true, "sprintf": true, "snprintf": true,
 }
+
+// libcUndeclared are the library functions that a program may call as
+// __builtin_name, which cc/v4 does not declare, with wasi-libc's
+// signatures (musl's string.h and strings.h).
+var libcUndeclared = func() map[string]sig {
+	p := scalar{vt: wasm.I32, bits: 32, ptr: true, elem: 1}
+	return map[string]sig{
+		"memmove": scalarSig([]scalar{p, p, u32}, &p),
+		"mempcpy": scalarSig([]scalar{p, p, u32}, &p),
+		"stpcpy":  scalarSig([]scalar{p, p}, &p),
+		"bzero":   scalarSig([]scalar{p, u32}, nil),
+		"index":   scalarSig([]scalar{p, intScalar}, &p),
+		"rindex":  scalarSig([]scalar{p, intScalar}, &p),
+	}
+}()

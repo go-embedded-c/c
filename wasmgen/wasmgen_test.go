@@ -58,7 +58,10 @@ func TestUnsupported(t *testing.T) {
 		{"struct S { long double d; }; int main(void) { struct S s = {1}; return 0; }", "initializer of type long double"},
 		{"int f(); int g(int (*p)()) { return p(1); } int main(void) { return 0; }", "call through a pointer to a function without a prototype"},
 		{"int f(int n) { int a[n]; return 0; } int main(void) { return f(2); }", "variable-length array"},
-		{"int main(void) { return __builtin_bswap32(1); }", "builtin __builtin_bswap32"},
+		{"int main(void) { return __builtin_classify_type(1); }", "builtin __builtin_classify_type"},
+		{"int main(void) { return __builtin_imaxabs(-1); }", "builtin __builtin_imaxabs"},
+		{"int main(void) { return __builtin_nan(\"1\") != 0; }", "__builtin_nan of a string other than \"\""},
+		{"int main(void) { __builtin_fabsl(1); return 0; }", "__builtin_fabsl"},
 		{"int main(void) { return __builtin_mul_overflow_p(1, 2, 0); }", "builtin __builtin_mul_overflow_p"},
 		{"int n = 2; void bar(char a[2][n]) { a[1][0] = 1; } int main(void) { return 0; }", "parameter of type pointer to array of char"},
 		{"int main(void) { return (int)__builtin_return_address(0); }", "builtin __builtin_return_address"},
@@ -335,6 +338,7 @@ func TestAgainstClang(t *testing.T) {
 		// stack unless each return frees them), the overflow builtins at
 		// every width, the quiet comparisons, the bit counts
 		builtinsProgram,
+		builtinsProgram2,
 	} {
 		h.check(src)
 	}
@@ -379,6 +383,32 @@ int main(void) {
 	__builtin_prefetch(&k, 0, 3);
 	if (__builtin_expect(k == 12345, 0)) __builtin_unreachable();
 	return (int)__builtin_expect(k, 0) & 0x7f;
+}
+`
+
+// builtinsProgram2: the floating-point and byte builtins, printed with %a
+// so that every bit shows, and the library functions called by their
+// __builtin_ names.
+const builtinsProgram2 = `#include <stdio.h>
+int main(void) {
+	double z = 0, n = __builtin_nan(""), m = -n, d = -2.5; float f = -0.0f, nf = __builtin_nanf("");
+	char b[16] = "abcdefgh", c[16];
+	unsigned long long w = 0x0102030405060708ULL;
+	printf("%a %a %a %a %a %a\n", __builtin_fabs(d), __builtin_fabsf(f), __builtin_copysign(3, -0.0), __builtin_copysignf(2, nf), __builtin_inf(), (double)__builtin_huge_valf());
+	printf("%d %d %d %d %d %d %d %d\n", __builtin_isinf(1 / z), __builtin_isinf(-1 / z), __builtin_isinf(n), __builtin_isfinite(d), __builtin_isfinite(n), __builtin_isfinite(__builtin_inff()), __builtin_isnan(n), __builtin_isnan(f));
+	printf("%d %d %d %d %d %d %d\n", __builtin_signbit(f), __builtin_signbit(d), __builtin_signbit(z), __builtin_signbit(m), __builtin_signbit(2.0f), __builtin_signbit(2.0), n != n);
+	printf("%d %d %d %d %d\n", __builtin_ffs(0), __builtin_ffs(8), __builtin_ffs(-1), __builtin_ffsl(0x80000000), __builtin_ffsll(1ULL << 40));
+	printf("%x %x %llx %x\n", __builtin_bswap16(0x1234), __builtin_bswap32(0x12345678), __builtin_bswap64(w), __builtin_bswap16(0xff01) + 1);
+	__builtin_memmove(b + 2, b, 5);
+	*(char *)__builtin_mempcpy(c, "xyz", 3) = 0;
+	__builtin_stpcpy(c + 3, "!");
+	__builtin_bzero(b + 8, 2);
+	printf("%s %s %d %d\n", b, c, (int)((char *)__builtin_index(b, 'c') - b), (int)((char *)__builtin_rindex(b, 'c') - b));
+	__builtin_sprintf(c, "%d-%s", 42, "q");
+	__builtin_fprintf(stdout, "[%s]\n", c);
+	__builtin_snprintf(c, 4, "%s", "truncated");
+	puts(c);
+	return 0;
 }
 `
 
