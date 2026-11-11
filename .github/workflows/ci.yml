@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
       - run: go version
       # internal/cc is cc/v4 as published: three `return` after infinite loops.
       - run: go vet -unreachable=false ./...
@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
       - run: "$(go env GOPATH)/bin/govulncheck ./..."
 
@@ -75,7 +75,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
       - run: go test -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime 90s ${{ matrix.pkg }}
 
   # The live oracle: clang 23.1.4 compiling to wasm32-wasip1 against wasi-libc,
@@ -94,13 +94,24 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
       - name: Toolchain cache
+        id: toolchain-cache
         uses: actions/cache@v6.1.0
         with:
           path: ${{ env.CORACLE_HOME }}
           key: coracle-home-llvm-23.1.4-wasi-libc-d9ad2d11991c-${{ hashFiles('internal/provision/provision.go') }}
-      - run: sudo apt-get install -y -qq zstd cmake make
+      # zstd, cmake and make build the toolchain, which a cache hit already
+      # holds (provision: "already installed" before any of them runs). On
+      # 2026-11-11 the runner could not resolve security.ubuntu.com, where
+      # its stale package index sent apt for cmake: three runs failed in an
+      # hour on a cache hit that needed none of it. On a miss, refresh the
+      # index first.
+      - name: Build tools for the toolchain
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zstd cmake make
       - name: Provision the pinned toolchain
         run: go run ./cmd/coracle toolchain --home "$CORACLE_HOME" --jobs 4
       - run: go run ./cmd/coracle version
