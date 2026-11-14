@@ -91,6 +91,13 @@ func (m *module) staticValue(e cc.ExpressionNode, t cc.Type, seg *wasm.Segment, 
 		copy(seg.Init[off:off+t.Size()], v)
 		return nil
 	}
+	if isLD(t) {
+		// The 16 bytes of the binary128 value, computed exactly (quad.go).
+		if !ldStatic(e, seg.Init[off:]) {
+			return unsupported(e, "non-constant initializer")
+		}
+		return nil
+	}
 	s, ok := scalarOf(t)
 	if !ok {
 		return unsupported(e, "initializer of type "+typeName(t))
@@ -120,11 +127,11 @@ func (m *module) staticValue(e cc.ExpressionNode, t cc.Type, seg *wasm.Segment, 
 		copy(seg.Init[off:], b[:s.bits/8])
 		return nil
 	}
-	if fs, ok := floatScalarOf(e.Type()); ok {
+	if fs, ok := floatScalarOf(e.Type()); ok || isLD(e.Type()) {
 		// int i = 2.5: toward zero (C11 6.3.1.4p1); out of range is
 		// undefined, and refused.
 		v, ok := floatConst(e)
-		if fs.isFloat && ok && v > -(1<<63) && v < 1<<63 {
+		if (fs.isFloat || isLD(e.Type())) && ok && v > -(1<<63) && v < 1<<63 {
 			b := binary.LittleEndian.AppendUint64(nil, uint64(convertConst(int64(v), s)))
 			copy(seg.Init[off:], b[:s.bits/8])
 			return nil
@@ -894,16 +901,23 @@ func (g *fgen) localInit(in *cc.Initializer, slot int64) error {
 			g.op(0xfc, 10, 0, 0) // memory.copy
 			continue
 		}
+		if isLD(t) {
+			g.slotAddress(at)
+			if err := g.ldAddr(e); err != nil {
+				return err
+			}
+			g.constant(quadSize, intScalar)
+			g.op(0xfc, 10, 0, 0) // memory.copy
+			continue
+		}
 		s, ok := scalarOf(t)
 		if !ok {
 			return unsupported(e, "initializer of type "+typeName(t))
 		}
 		g.slotAddress(at)
-		from, err := g.rvalue(e)
-		if err != nil {
+		if err := g.operand(e, s); err != nil {
 			return err
 		}
-		g.convert(from, s)
 		op, align := s.store()
 		g.memarg(op, align)
 	}

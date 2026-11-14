@@ -123,10 +123,21 @@ const (
 	passDirect passing = iota
 	passIgnored
 	passIndirect
+	// passQuad: a long double, two i64 (low half, then high half) as a
+	// parameter, through the caller's memory (sret) as a result.
+	passQuad
 )
 
 // abiOf classifies t; s is the wasm scalar for passDirect.
 func abiOf(t cc.Type) (passing, scalar, bool) {
+	if isLD(t) {
+		return passQuad, scalar{vt: wasm.I64, bits: 64}, true
+	}
+	if leaf, ok := singletonLeaf(t); ok && isAggregate(t) && isLD(leaf) {
+		// clang passes struct { long double x; } as its two i64, which is
+		// not what the other aggregates do: refused, never compiled wrongly.
+		return 0, scalar{}, false
+	}
 	if !isAggregate(t) {
 		s, ok := scalarOf(t)
 		return passDirect, s, ok
@@ -148,12 +159,22 @@ func abiOf(t cc.Type) (passing, scalar, bool) {
 // scalar value and is not specified to have greater than natural
 // alignment": it is passed as that scalar.
 func singleton(t cc.Type) (scalar, bool) {
+	leaf, ok := singletonLeaf(t)
+	if !ok {
+		return scalar{}, false
+	}
+	return scalarOf(leaf)
+}
+
+// singletonLeaf is singleton's walk: the type of the one scalar object t
+// contains, whether or not the generator has a wasm scalar for it.
+func singletonLeaf(t cc.Type) (cc.Type, bool) {
 	switch x := t.(type) {
 	case *cc.ArrayType:
 		if x.Len() != 1 {
-			return scalar{}, false
+			return nil, false
 		}
-		return singleton(x.Elem())
+		return singletonLeaf(x.Elem())
 	case *cc.StructType, *cc.UnionType:
 		var fields []*cc.Field
 		var n int
@@ -175,16 +196,16 @@ func singleton(t cc.Type) (scalar, bool) {
 				continue
 			}
 			if only != nil || f.IsBitfield() {
-				return scalar{}, false
+				return nil, false
 			}
 			only = f
 		}
 		if only == nil || t.Align() > only.Type().Align() || t.Size() != only.Type().Size() {
-			return scalar{}, false
+			return nil, false
 		}
-		return singleton(only.Type())
+		return singletonLeaf(only.Type())
 	}
-	return scalarOf(t)
+	return t, true
 }
 
 // isVoid reports whether t is void.

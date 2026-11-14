@@ -31,6 +31,10 @@ func (g *fgen) varargs(args []cc.ExpressionNode) error {
 	for _, a := range args {
 		v := vararg{e: a, t: a.Type()}
 		switch {
+		case isLD(v.t):
+			// 16 bytes at a 16-byte boundary of the buffer (probed with
+			// clang 23.1.4: printf("%d %Lf", 5, x) puts x at offset 16).
+			v.pass, v.s = passQuad, scalar{vt: wasm.I64, bits: 8 * quadSize}
 		case isAggregate(v.t):
 			pass, s, ok := abiOf(v.t)
 			if !ok {
@@ -74,6 +78,15 @@ func (g *fgen) varargs(args []cc.ExpressionNode) error {
 			}
 			g.constant(v.t.Size(), intScalar)
 			g.op(0xfc, 10, 0, 0) // memory.copy
+		}
+		if v.pass == passQuad {
+			g.slotAddress(buf + v.off)
+			if err := g.ldAddr(v.e); err != nil {
+				return err
+			}
+			g.constant(quadSize, intScalar)
+			g.op(0xfc, 10, 0, 0) // memory.copy
+			continue
 		}
 		g.slotAddress(buf + v.off)
 		switch {

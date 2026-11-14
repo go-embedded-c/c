@@ -128,7 +128,11 @@ func (m *module) function(fd *cc.FunctionDefinition) error {
 		idx++
 	}
 	for _, p := range f.params {
-		if p.pass != passIgnored {
+		switch p.pass {
+		case passIgnored:
+		case passQuad:
+			g.nparams += 2
+		default:
 			g.nparams++
 		}
 	}
@@ -154,6 +158,13 @@ func (m *module) function(fd *cc.FunctionDefinition) error {
 			// that object.
 			g.refs[dp] = idx
 			idx++
+		case passQuad:
+			// A long double arrives as two i64; the parameter is the
+			// 16-byte object they are spilled to.
+			slot := g.frameSlot(quadSize, 16)
+			g.slots[dp] = slot
+			g.spilled = append(g.spilled, spilledParam{param: idx, slot: slot, s: s64}, spilledParam{param: idx + 1, slot: slot + 8, s: s64})
+			idx += 2
 		default:
 			if isAggregate(cp.t) || dp.AddressTaken() {
 				size := max(cp.t.Size(), int64(cp.s.bits/8))
@@ -290,6 +301,9 @@ func (g *fgen) compound(cs *cc.CompoundStatement) error {
 // condition evaluates e as a controlling expression: it pushes an i32
 // that is non-zero when e compares unequal to 0 (C11 6.8.4.1).
 func (g *fgen) condition(e cc.ExpressionNode) error {
+	if isLD(e.Type()) {
+		return g.ldCondition(e)
+	}
 	from, err := g.rvalue(e)
 	if err != nil {
 		return err
@@ -328,6 +342,19 @@ func (g *fgen) statement(s *cc.Statement) error {
 func (g *fgen) jumpStatement(j *cc.JumpStatement) error {
 	switch j.Case {
 	case cc.JumpStatementReturn:
+		if e := j.ExpressionList; e != nil && isLD(g.sig.rtype) {
+			// A long double result goes to the caller's memory, whose
+			// address is parameter 0.
+			g.op(opLocalGet, 0)
+			if err := g.ldAddr(e); err != nil {
+				return err
+			}
+			g.constant(quadSize, intScalar)
+			g.op(0xfc, 10, 0, 0) // memory.copy
+			g.ret()
+			g.dead()
+			return nil
+		}
 		if e := j.ExpressionList; e != nil && isAggregate(g.sig.rtype) && isAggregate(e.Type()) {
 			// A structure or union result (BasicCABI.md): copied to the
 			// caller's memory, whose address is parameter 0, or loaded as
@@ -366,11 +393,9 @@ func (g *fgen) jumpStatement(j *cc.JumpStatement) error {
 					return err
 				}
 			} else {
-				from, err := g.rvalue(j.ExpressionList)
-				if err != nil {
+				if err := g.operand(j.ExpressionList, g.result); err != nil {
 					return err
 				}
-				g.convert(from, g.result)
 				g.epilogue()
 				g.op(opReturn)
 				g.cur.term = termReturn
@@ -643,11 +668,9 @@ func (g *fgen) localDeclaration(decl *cc.Declaration) error {
 		if id.Initializer.AssignmentExpression == nil {
 			return unsupported(id.Initializer, "braced initializer")
 		}
-		from, err := g.rvalue(id.Initializer.AssignmentExpression)
-		if err != nil {
+		if err := g.operand(id.Initializer.AssignmentExpression, s); err != nil {
 			return err
 		}
-		g.convert(from, s)
 		g.op(opLocalSet)
 		g.uleb(uint64(idx))
 	}
