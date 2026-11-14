@@ -200,6 +200,16 @@ func floatLiteral(e cc.ExpressionNode) (float64, bool) {
 // float expression may have been computed in double (cc/v4 evaluates in
 // float64), which can differ from clang in the last bit.
 func floatConst(e cc.ExpressionNode) (float64, bool) {
+	if isLD(e.Type()) {
+		// A long double constant, rounded once to binary128 and once more
+		// here, as clang's fptrunc does (quad.go).
+		f, ok := ldValue(e)
+		if !ok {
+			return 0, false
+		}
+		v, _ := f.Float64()
+		return v, true
+	}
 	if v, ok := floatLiteral(e); ok {
 		return v, true
 	}

@@ -97,7 +97,7 @@ func (g *fgen) builtin(x *cc.PostfixExpression, name string, args []cc.Expressio
 		return true, g.fabsCopysign(x, b, args)
 	case "inf", "inff", "infl", "huge_val", "huge_valf", "huge_vall", "nan", "nanf", "nanl":
 		return true, g.infNaN(x, b, args)
-	case "isinf", "isfinite", "isnan", "signbit":
+	case "isinf", "isfinite", "isnan", "signbit", "signbitl":
 		if err := arity(1); err != nil {
 			return true, err
 		}
@@ -205,6 +205,9 @@ func (g *fgen) bitCount(x *cc.PostfixExpression, b string, a cc.ExpressionNode) 
 // common real type of the operands (C11 6.3.1.8). wasm's comparisons do
 // not raise on a NaN; isunordered is a != a | b != b.
 func (g *fgen) unorderedCompare(x *cc.PostfixExpression, b string, args []cc.ExpressionNode) error {
+	if isLD(args[0].Type()) || isLD(args[1].Type()) {
+		return g.ldUnordered(x, b, args)
+	}
 	var ops [2]uint32
 	var froms [2]scalar
 	common := scalar{vt: wasm.F32, bits: 32, signed: true, isFloat: true}

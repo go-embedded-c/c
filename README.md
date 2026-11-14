@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float` and `double`, bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), and address constants of members (`&s.m`, `&p->m`). 1477 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float`, `double` and `long double` (binary128), bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), and address constants of members (`&s.m`, `&p->m`). 1502 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -268,8 +268,8 @@ is the one clang emits at `-O0` (checked with `llvm-objdump`):
   zero, so NaN is true.
 - Negation is `f.neg`, so `-(+0.0)` is `-0.0`.
 - A floating literal is rounded once, from its text, to its own type.
-- `long double` (binary128) is refused, and so are GNU vector types: they
-  were read as their element type before.
+- GNU vector types are refused: they were read as their element type
+  before. `long double` (binary128) is described below.
 
 W6 adds bit-fields:
 
@@ -317,7 +317,7 @@ what clang 23.1.4 emits for wasm32:
 - `clz`, `ctz` and `popcount` (plain, `l` and `ll`), `expect`, `prefetch`,
   `unreachable` and `trap` are also supported.
 - Floating-point builtins, for `float` and `double` (the `long double`
-  forms are refused):
+  forms are in the `long double` paragraph below):
   - `fabs` and `copysign`;
   - `inf` and `huge_val`;
   - `nan(s)` with the payload clang gives it: `s` read as an integer
@@ -340,6 +340,42 @@ what clang 23.1.4 emits for wasm32:
 - A pointer to a variable-length array is refused. Its step is a size
   known only at run time, and cc/v4's is not that size.
 
+`long double` is IEEE binary128, 16 bytes aligned to 16 (BasicCABI.md). It
+is not a wasm scalar: it is a 16-byte memory object, and every operation
+calls compiler-rt's soft-float routines, as clang 23.1.4 emits them
+(probed with `-S`):
+
+- A parameter is two `i64`, low half first, spilled to a 16-byte frame
+  slot; a result goes through the `sret` pointer, as a structure's does. A
+  value of type `long double` evaluates to the address of its object, or of
+  a frame temporary.
+- `+ - * /` are `__addtf3`, `__subtf3`, `__multf3` and `__divtf3`;
+  comparisons are `__lttf2`, `__letf2`, `__gttf2`, `__getf2`, `__eqtf2` and
+  `__netf2` compared with 0, so a NaN makes `<`, `<=`, `>`, `>=` and `==`
+  false and `!=` true. A truth value, `!x` and a condition are
+  `__netf2(x, 0)`; negation flips the sign bit of the high half.
+- Conversions go through `__extendsftf2`, `__extenddftf2`, `__floatsitf`,
+  `__floatunsitf`, `__floatditf` and `__floatunditf` in, and `__trunctfsf2`,
+  `__trunctfdf2`, `__fixtfsi`, `__fixunstfsi`, `__fixtfdi` and `__fixunstfdi`
+  out. A conversion to `_Bool` compares with zero.
+- Locals, globals, members, arrays, compound assignment, `++` and `--`, `?:`,
+  calls, and variadic arguments (16 bytes at a 16-byte boundary of the
+  buffer) and `va_arg` work.
+- A static initialiser writes the 16 bytes of the value, computed exactly
+  with `math/big`: a literal is parsed once to 113 bits, each operation is
+  rounded to 113 bits, and an overflow becomes infinity, as clang's APFloat
+  does. cc/v4's own folded value (256 bits) is not used. A subnormal
+  result is refused.
+- Builtins: `fabsl`, `copysignl`, `infl`, `huge_vall`, `nanl` (the low 112
+  bits of the payload and bit 111 set; a string longer than 18 characters
+  is refused), `isinf`, `isfinite`, `isnan`, `signbit` and `signbitl`, and
+  the quiet comparisons, on long doubles.
+- Refused by name: `struct { long double x; }` as a parameter or a result
+  (clang passes it as two `i64`, which is not what the other structures
+  do), `_Complex long double`, a compound assignment such as `k %= ld` of a
+  scalar, and `__builtin_isinfl` and `__builtin_isnanl`, which clang does
+  not know either.
+
 W7 adds `goto`:
 
 - A label is a block of the graph and a `goto` is an edge to it. The
@@ -357,7 +393,9 @@ W7 adds `goto`:
 The generator refuses anything else with an `*Unsupported` error that names
 the construct.
 
-Four tests check the generator:
+Five tests check the generator (`TestQuadABIAgainstClang`, which does for
+`long double` parameters, results and varargs what `TestABIAgainstClang`
+does for structures, is the fifth):
 
 - `TestRandomExpressions` generates random programs without undefined
   behaviour. Each must exit exactly as clang's does: 60 programs in CI, 600
@@ -371,9 +409,9 @@ Four tests check the generator:
   misaligning a `long long` in the varargs buffer, on the side that is
   ours.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-14, with static member addresses and the floating-point builtins
-  in static initializers, 1477 files ran the same as under clang (1472 with
-  the floating-point and byte builtins, 1440 with the computing builtins,
+  2026-11-14, with `long double`, 1502 files ran the same as under clang
+  (1477 with static member addresses and the floating-point builtins in
+  static initializers, 1472 with the floating-point and byte builtins, 1440 with the computing builtins,
   1404 with function pointers, 1381 after W7, 1350 with compound literals,
   1327 with the library builtins, 1250 after W6, 1160 after W5, 1049 after
   W4d, 1005 after W4c, 952 after W4b, 762 after W4a, 454 after W3, 10 after
@@ -388,7 +426,11 @@ Four tests check the generator:
     A count can rise while one file is lost: the builtins wave lost
     `pr22061-2.c` while it gained 37 others, and nothing failed. Checked
     this way, the floating-point and byte builtins gained 32 files and lost
-    none, and the static member addresses gained 5 and lost none.
+    none, the static member addresses gained 5 and lost none, and `long
+    double` gained 25 and lost none. The `long double` files that still do
+    not count are refused by clang (`pr39228.c` uses `__builtin_isinfl`;
+    `fp-cmp-4l.c` and `fp-cmp-8l.c` include a file from a directory clang
+    is not given) or use `asm` or `__builtin_va_arg_pack`.
   - No other file differs. There are three known differences:
     - `shiftdi-2.c` comes from the oracle compiling with `-std=gnu89`,
       where a large decimal constant has another type (#20);

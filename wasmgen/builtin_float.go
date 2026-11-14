@@ -33,6 +33,132 @@ func floatOf(x *cc.PostfixExpression, b, base string) (scalar, error) {
 	return scalar{}, unsupported(x, "__builtin_"+b)
 }
 
+// ldBuiltinCall returns the long double builtin x calls, without its prefix
+// (fabsl, copysignl, infl, huge_vall, nanl), and its arguments.
+func ldBuiltinCall(x *cc.PostfixExpression) (string, []cc.ExpressionNode, bool) {
+	d := functionDesignator(x.PostfixExpression)
+	if d == nil {
+		return "", nil, false
+	}
+	b, ok := strings.CutPrefix(d.Name(), "__builtin_")
+	if !ok {
+		return "", nil, false
+	}
+	switch b {
+	case "fabsl", "copysignl", "infl", "huge_vall", "nanl":
+	default:
+		return "", nil, false
+	}
+	var args []cc.ExpressionNode
+	for l := x.ArgumentExpressionList; l != nil; l = l.ArgumentExpressionList {
+		args = append(args, l.AssignmentExpression)
+	}
+	return b, args, true
+}
+
+// ldBuiltinConst returns the binary128 value of infl, huge_vall and nanl.
+// nan(s) keeps the low 112 bits of s as the significand and sets bit 111
+// (IEEEFloat::makeNaN, precision 113); only strings whose value fits 64 bits
+// are read, a longer one is refused.
+func ldBuiltinConst(x *cc.PostfixExpression) (lo, hi uint64, ok bool) {
+	b, args, isLDB := ldBuiltinCall(x)
+	if !isLDB {
+		return 0, 0, false
+	}
+	switch b {
+	case "infl", "huge_vall":
+		return 0, 0x7fff << 48, len(args) == 0
+	case "nanl":
+		if len(args) != 1 {
+			return 0, 0, false
+		}
+		str, ok := stringValue(args[0])
+		str = strings.TrimSuffix(str, "\x00")
+		if !ok || len(str) > 18 {
+			return 0, 0, false
+		}
+		fill, ok := nanPayload(str)
+		if !ok {
+			return 0, 0, false
+		}
+		return fill, 0x7fff<<48 | 1<<47, true
+	}
+	return 0, 0, false
+}
+
+// ldBuiltin compiles a call of a long double builtin to the address of its
+// value; ok is false when x is not one.
+func (g *fgen) ldBuiltin(x *cc.PostfixExpression) (ok bool, err error) {
+	b, args, isLDB := ldBuiltinCall(x)
+	if !isLDB {
+		return false, nil
+	}
+	switch b {
+	case "infl", "huge_vall", "nanl":
+		lo, hi, ok := ldBuiltinConst(x)
+		if !ok {
+			return true, unsupported(x, "__builtin_"+b+" of a string clang does not read as a number")
+		}
+		tmp := g.ldTemp()
+		g.ldStoreConst(tmp, lo, hi)
+		g.slotAddress(tmp)
+		return true, nil
+	case "fabsl":
+		if len(args) != 1 {
+			return true, unsupported(x, "__builtin_fabsl with another number of arguments")
+		}
+		a, err := g.ldLocal(args[0])
+		if err != nil {
+			return true, err
+		}
+		tmp := g.ldTemp()
+		g.slotAddress(tmp)
+		g.getLocal(a)
+		g.memargOff(opI64Load, 3, 0)
+		g.memargOff(opI64Store, 3, 0)
+		g.slotAddress(tmp)
+		g.getLocal(a)
+		g.memargOff(opI64Load, 3, 8)
+		g.op(opI64Const)
+		g.sleb(1<<63 - 1)
+		g.op(opI64And)
+		g.memargOff(opI64Store, 3, 8)
+		g.slotAddress(tmp)
+		return true, nil
+	}
+	// copysignl: the magnitude of a, the sign of b.
+	if len(args) != 2 {
+		return true, unsupported(x, "__builtin_copysignl with another number of arguments")
+	}
+	a, err := g.ldLocal(args[0])
+	if err != nil {
+		return true, err
+	}
+	bl, err := g.ldLocal(args[1])
+	if err != nil {
+		return true, err
+	}
+	tmp := g.ldTemp()
+	g.slotAddress(tmp)
+	g.getLocal(a)
+	g.memargOff(opI64Load, 3, 0)
+	g.memargOff(opI64Store, 3, 0)
+	g.slotAddress(tmp)
+	g.getLocal(a)
+	g.memargOff(opI64Load, 3, 8)
+	g.op(opI64Const)
+	g.sleb(1<<63 - 1)
+	g.op(opI64And)
+	g.getLocal(bl)
+	g.memargOff(opI64Load, 3, 8)
+	g.op(opI64Const)
+	g.sleb(-1 << 63)
+	g.op(opI64And, opI64Or)
+	g.memargOff(opI64Store, 3, 8)
+	g.slotAddress(tmp)
+	return true, nil
+}
+
 // fabs and copysign: f64.abs and f64.copysign, or their f32 forms.
 func (g *fgen) fabsCopysign(x *cc.PostfixExpression, b string, args []cc.ExpressionNode) error {
 	base, n, op := "fabs", 1, byte(opF64Abs)
@@ -202,6 +328,19 @@ func staticFloatBits(e cc.ExpressionNode, s scalar) (uint64, bool) {
 			}
 		}
 	}
+	if isLD(e.Type()) {
+		// Rounded once from binary128, not through float64 (quad.go).
+		f, ok := ldValue(e)
+		if !ok {
+			return 0, false
+		}
+		if s.vt == wasm.F32 {
+			v, _ := f.Float32()
+			return uint64(math.Float32bits(v)), true
+		}
+		v, _ := f.Float64()
+		return math.Float64bits(v), true
+	}
 	v, ok := floatConst(e)
 	if !ok {
 		return 0, false
@@ -216,6 +355,12 @@ func staticFloatBits(e cc.ExpressionNode, s scalar) (uint64, bool) {
 // double, in its own type: |x| == inf, |x| < inf, x != x, and the sign
 // bit of its representation.
 func (g *fgen) classify(x *cc.PostfixExpression, b string, a cc.ExpressionNode) error {
+	if isLD(a.Type()) {
+		return g.ldClassify(x, strings.TrimSuffix(b, "l"), a)
+	}
+	if strings.HasSuffix(b, "l") {
+		return unsupported(x, "__builtin_"+b+" of "+typeName(a.Type()))
+	}
 	from, err := g.rvalue(a)
 	if err != nil {
 		return err

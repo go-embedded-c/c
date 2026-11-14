@@ -340,12 +340,7 @@ func (g *fgen) rvalue(e cc.ExpressionNode) (scalar, error) {
 		if x.Case == cc.CastExpressionUnary {
 			return g.rvalue(x.UnaryExpression)
 		}
-		from, err := g.rvalue(x.CastExpression)
-		if err != nil {
-			return s, err
-		}
-		g.convert(from, s)
-		return s, nil
+		return s, g.operand(x.CastExpression, s)
 	case *cc.UnaryExpression:
 		return s, g.unary(x, s)
 	case *cc.PostfixExpression:
@@ -417,6 +412,14 @@ func (g *fgen) compare(a, b cc.ExpressionNode, signed, unsigned byte) error {
 		}
 		g.op(unsigned)
 		return nil
+	}
+	if (isLD(a.Type()) || isLD(b.Type())) && !isAggregate(a.Type()) && !isAggregate(b.Type()) {
+		// Both operands are arithmetic: the comparison is in long double.
+		_, oka := scalarOf(a.Type())
+		_, okb := scalarOf(b.Type())
+		if (oka || isLD(a.Type())) && (okb || isLD(b.Type())) {
+			return g.ldCompare(a, b, signed)
+		}
 	}
 	if _, ok := scalarOf(a.Type()); !ok {
 		return unsupported(a, "comparison of "+typeName(a.Type()))
@@ -490,6 +493,14 @@ func (g *fgen) unary(x *cc.UnaryExpression, s scalar) error {
 		g.normalize(s)
 		return nil
 	case cc.UnaryExpressionNot:
+		if isLD(x.CastExpression.Type()) {
+			// !x is x == 0: false for NaN.
+			if err := g.ldCondition(x.CastExpression); err != nil {
+				return err
+			}
+			g.op(opI32Eqz)
+			return nil
+		}
 		from, err := g.rvalue(x.CastExpression)
 		if err != nil {
 			return err
@@ -540,6 +551,13 @@ func (g *fgen) effect(e cc.ExpressionNode) error {
 		case cc.PostfixExpressionInc, cc.PostfixExpressionDec:
 			return g.incdec(x, x.PostfixExpression, x.Case == cc.PostfixExpressionInc, true, false)
 		case cc.PostfixExpressionCall:
+			if isLD(x.Type()) {
+				if err := g.ldAddr(x); err != nil {
+					return err
+				}
+				g.op(opDrop)
+				return nil
+			}
 			if isVoid(x.Type()) || isAggregate(x.Type()) {
 				return g.call(x)
 			}
@@ -606,6 +624,13 @@ func (g *fgen) effect(e cc.ExpressionNode) error {
 	}
 	if isAggregate(e.Type()) {
 		if err := g.aggAddr(e); err != nil {
+			return err
+		}
+		g.op(opDrop)
+		return nil
+	}
+	if isLD(e.Type()) {
+		if err := g.ldAddr(e); err != nil {
 			return err
 		}
 		g.op(opDrop)
@@ -794,16 +819,21 @@ func (g *fgen) assign(x *cc.AssignmentExpression, want bool) error {
 		// aggAddr takes the value, and cc/v4 refuses op= on structures.
 		return g.aggAssign(x, false)
 	}
+	if isLD(x.UnaryExpression.Type()) {
+		// Only effect gets here with a long double (ldAddr takes the value).
+		return g.ldAssign(x, false)
+	}
 	t, err := g.lvalue(x.UnaryExpression)
 	if err != nil {
 		return err
 	}
+	if x.Case != cc.AssignmentExpressionAssign && isLD(x.AssignmentExpression.Type()) {
+		return g.ldScalarAssign(x, t, want)
+	}
 	if x.Case == cc.AssignmentExpressionAssign {
-		from, err := g.rvalue(x.AssignmentExpression)
-		if err != nil {
+		if err := g.operand(x.AssignmentExpression, t.s); err != nil {
 			return err
 		}
-		g.convert(from, t.s)
 		if !t.local {
 			v := g.local(t.s.vt)
 			g.op(opLocalSet)
@@ -890,6 +920,17 @@ func (g *fgen) assign(x *cc.AssignmentExpression, want bool) error {
 // the size of the object pointed to, for a pointer), yielding the old value
 // for the postfix forms.
 func (g *fgen) incdec(n, e cc.ExpressionNode, inc, post, want bool) error {
+	if isLD(e.Type()) {
+		if err := g.ldIncDec(e, inc, post, want); err != nil {
+			return err
+		}
+		if want {
+			// A value of type long double has no scalar form: rvalue refuses
+			// the type first, so only effect arrives here.
+			g.op(opDrop)
+		}
+		return nil
+	}
 	t, err := g.lvalue(e)
 	if err != nil {
 		return err
@@ -1020,6 +1061,13 @@ func (g *fgen) emitCall(x *cc.PostfixExpression, f *sig, args, extra []cc.Expres
 			g.constant(p.t.Size(), intScalar)
 			g.op(0xfc, 10, 0, 0) // memory.copy
 			g.slotAddress(tmp)
+		case p.pass == passQuad:
+			// A long double: its two i64, low half first.
+			la, err := g.ldLocal(a)
+			if err != nil {
+				return err
+			}
+			g.ldHalves(la)
 		case isAggregate(p.t):
 			// A singleton: its one scalar, loaded.
 			if err := g.aggAddr(a); err != nil {
@@ -1028,11 +1076,9 @@ func (g *fgen) emitCall(x *cc.PostfixExpression, f *sig, args, extra []cc.Expres
 			op, align := p.s.load()
 			g.memarg(op, align)
 		default:
-			from, err := g.rvalue(a)
-			if err != nil {
+			if err := g.operand(a, p.s); err != nil {
 				return err
 			}
-			g.convert(from, p.s)
 		}
 	}
 	if f.variadic {
@@ -1046,7 +1092,7 @@ func (g *fgen) emitCall(x *cc.PostfixExpression, f *sig, args, extra []cc.Expres
 		}
 	}
 	emit()
-	if isAggregate(f.rtype) {
+	if isAggregate(f.rtype) || isLD(f.rtype) {
 		if f.result != nil {
 			// A singleton result: store it to memory, to give it an address.
 			v := g.local(f.result.vt)

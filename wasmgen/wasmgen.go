@@ -119,7 +119,7 @@ func signature(n cc.Node, ft *cc.FunctionType) (sig, error) {
 	switch {
 	case !ok:
 		return sig{}, unsupported(n, "result of type "+typeName(r))
-	case pass == passIndirect:
+	case pass == passIndirect, pass == passQuad:
 		sg.sret = r
 	case pass == passDirect:
 		sg.result = &s
@@ -144,7 +144,11 @@ func (m *module) wasmType(sg sig) uint32 {
 		t.Params = append(t.Params, wasm.I32)
 	}
 	for _, p := range sg.params {
-		if p.pass != passIgnored {
+		switch p.pass {
+		case passIgnored:
+		case passQuad:
+			t.Params = append(t.Params, wasm.I64, wasm.I64)
+		default:
 			t.Params = append(t.Params, p.s.vt)
 		}
 	}
@@ -449,7 +453,7 @@ func (m *module) stringLiteral(v string, n int64) uint32 {
 // storable reports whether objects of type t can be laid out by the
 // generator: scalars, structures, unions and arrays of them.
 func storable(t cc.Type) bool {
-	if _, ok := scalarOf(t); ok {
+	if _, ok := scalarOf(t); ok || isLD(t) {
 		return true
 	}
 	if a, ok := t.(*cc.ArrayType); ok && !a.IsVLA() {

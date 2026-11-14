@@ -82,7 +82,7 @@ Each increment ends with a merged PR. Each PR also adds a test that holds the gc
 | W5 | `float`/`double`, conversions, comparisons | — |
 | W6 | varargs, bit-fields, compound literals, initialisers of every kind | — |
 | W7 | `goto`, irreducible graphs, the splitting bound | — |
-| W8 | `long double`, `_Complex`, `setjmp`/`longjmp` (exnref, behind `CoreFeaturesExceptionHandling` in wazero) | the M5 gate: at least ccgo's pass rate on the same files |
+| W8 | `long double` (done: wasmgen/quad.go), `_Complex`, `setjmp`/`longjmp` (exnref, behind `CoreFeaturesExceptionHandling` in wazero) | the M5 gate: at least ccgo's pass rate on the same files |
 
 ## Security and performance
 

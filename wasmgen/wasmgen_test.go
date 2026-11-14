@@ -43,10 +43,14 @@ func TestUnsupported(t *testing.T) {
 		{"int f(int x) { int i = 0; if (x) goto in; while (i < 10) { i += 2; in: i++; } return i; } int main(void) { return f(1); }", "irreducible control flow (W7)"},
 		{"int main(void) { int x = 1; switch (x) { case 1 ... 3: return 1; } return 0; }", "case range"},
 		{"int main(void) { int x = 1; return x ?: 2; }", "?: without a middle operand"},
-		{"long double d; int main(void) { return 0; }", "file-scope object of type long double"},
-		{"int main(void) { double d = 1.5L; return d; }", "value of type long double"},
-		{"double d = 1.5L; int main(void) { return 0; }", "non-constant initializer"},
-		{"int g(int, ...); int main(void) { return g(1, 1.0L); }", "variadic argument of type long double"},
+		{"_Complex long double c; int main(void) { return 0; }", "file-scope object of type _Complex long double"},
+		{"struct S { long double d; }; struct S f(struct S s) { return s; } int main(void) { return 0; }", "parameter of type struct S {d long double}"},
+		{"struct S { long double d[1]; }; int g(struct S); int main(void) { struct S s = {1}; return g(s); }", "parameter of type struct S {d array of 1 long double}"},
+		{"long double d = 1e-4950L; int main(void) { return 0; }", "non-constant initializer"},
+		{"int main(void) { long double d = 1e-4950L; return d; }", "long double constant 1e-4950L"},
+		{"int n; long double d = n; int main(void) { return 0; }", "non-constant initializer"},
+		{"int main(void) { long double d = 1; int k = 3; k %= d; return k; }", "compound assignment of a scalar by a long double"},
+		{"int main(void) { return (int)__builtin_nanl(\"0x1g\"); }", "__builtin_nanl of a string clang does not read as a number"},
 		{"typedef float v4 __attribute__((vector_size(16))); float f(v4 *p) { v4 t = *p; return 0; } int main(void) { return 0; }", "local of type v4"},
 		{"typedef int v4 __attribute__((vector_size(16))); int main(void) { v4 a, b; return 0; }", "local of type v4"},
 		{"void f(int n) { struct S { int i[n]; int k; } s; } int main(void) { f(1); return 0; }", "local of type struct S {i array of int; k int}"},
@@ -55,13 +59,12 @@ func TestUnsupported(t *testing.T) {
 		{"struct S { long long a: 24; }; int main(void) { struct S s; s.a = 1; return s.a; }", "bit-field of a type wider than int, narrower than int"},
 		{"int x; struct S { int a: 3; } s = {x}; int main(void) { return 0; }", "non-constant bit-field initializer"},
 		{"struct S { unsigned long long f:44; _Bool g:1; short h; }; int main(void) { struct S s; s.h = 1; return s.h; }", "bit-field layout that cc/v4 computes otherwise than clang"},
-		{"struct S { long double d; }; int main(void) { struct S s = {1}; return 0; }", "initializer of type long double"},
 		{"int f(); int g(int (*p)()) { return p(1); } int main(void) { return 0; }", "call through a pointer to a function without a prototype"},
 		{"int f(int n) { int a[n]; return 0; } int main(void) { return f(2); }", "variable-length array"},
 		{"int main(void) { return __builtin_classify_type(1); }", "builtin __builtin_classify_type"},
 		{"int main(void) { return __builtin_imaxabs(-1); }", "builtin __builtin_imaxabs"},
 		{"int main(void) { return __builtin_nan(\"0x1g\") != 0; }", "__builtin_nan of a string clang does not read as a number"},
-		{"int main(void) { __builtin_fabsl(1); return 0; }", "__builtin_fabsl"},
+		{"int main(void) { return __builtin_signbitl(1.0); }", "__builtin_signbitl of double"},
 		{"int main(void) { return __builtin_mul_overflow_p(1, 2, 0); }", "builtin __builtin_mul_overflow_p"},
 		{"int n = 2; void bar(char a[2][n]) { a[1][0] = 1; } int main(void) { return 0; }", "parameter of type pointer to array of char"},
 		{"int main(void) { return (int)__builtin_return_address(0); }", "builtin __builtin_return_address"},
@@ -107,6 +110,7 @@ func TestCompileSeeds(t *testing.T) {
 
 var compileSeeds = []string{
 	"int main(void) { return 0; }",
+	"long double g = 0.1L; long double f(long double x, int n, ...) { long double r = x * 2 + n; r += g; return r > 1 ? r : -r; } int main(void) { return (int)f(1.5L, 2) + !g; }",
 	"float f = 1.5f; double g(double d, float x) { return -d * x + (int)d; } int main(void) { double d = f; d /= 3; return g(d, 0.25f) < 1 && !d ? (unsigned)d : (long long)2.5e10; }",
 	"int main(void) { return 1 << 31; }",
 	"int main(void) { return (char)300; }",
@@ -340,6 +344,10 @@ func TestAgainstClang(t *testing.T) {
 		builtinsProgram,
 		builtinsProgram2,
 		staticInitProgram,
+		// long double (binary128): storage, parameters, results, every
+		// operation, comparison and conversion, varargs
+		quadProgram,
+		quadProgram2,
 	} {
 		h.check(src)
 	}
