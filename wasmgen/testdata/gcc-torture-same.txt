@@ -145,6 +145,7 @@
 20020402-3.c
 20020404-1.c
 20020406-1.c
+20020413-1.c
 20020418-1.c
 20020423-1.c
 20020503-1.c
@@ -219,6 +220,7 @@
 20030903-1.c
 20030909-1.c
 20030913-1.c
+20030914-1.c
 20030914-2.c
 20030916-1.c
 20030920-1.c
@@ -234,6 +236,7 @@
 20031214-1.c
 20031215-1.c
 20031216-1.c
+20040208-1.c
 20040218-1.c
 20040223-1.c
 20040307-1.c
@@ -331,6 +334,7 @@
 20080222-1.c
 20080408-1.c
 20080424-1.c
+20080502-1.c
 20080506-1.c
 20080506-2.c
 20080519-1.c
@@ -481,6 +485,7 @@
 930614-2.c
 930621-1.c
 930622-1.c
+930622-2.c
 930628-1.c
 930630-1.c
 930702-1.c
@@ -555,6 +560,7 @@
 960116-1.c
 960117-1.c
 960209-1.c
+960215-1.c
 960218-1.c
 960219-1.c
 960301-1.c
@@ -567,8 +573,10 @@
 960326-1.c
 960327-1.c
 960402-1.c
+960405-1.c
 960419-1.c
 960419-2.c
+960513-1.c
 960521-1.c
 960608-1.c
 960801-1.c
@@ -662,6 +670,7 @@ alias-1.c
 alias-access-path-1.c
 alias-access-path-2.c
 align-1.c
+align-2.c
 align-3.c
 alloca-1.c
 anon-1.c
@@ -773,6 +782,7 @@ compare-2.c
 compare-3.c
 complex-3.c
 const-addr-expr-1.c
+conversion.c
 cvt-1.c
 dbra-1.c
 divcmp-1.c
@@ -802,6 +812,8 @@ gofast.c
 ieee/20000320-1.c
 ieee/20001122-1.c
 ieee/20010114-2.c
+ieee/20010226-1.c
+ieee/20011123-1.c
 ieee/20030331-1.c
 ieee/20041213-1.c
 ieee/920518-1.c
@@ -815,6 +827,8 @@ ieee/compare-fp-1.c
 ieee/compare-fp-2.c
 ieee/compare-fp-3.c
 ieee/compare-fp-4.c
+ieee/copysign1.c
+ieee/copysign2.c
 ieee/fp-cmp-4.c
 ieee/fp-cmp-4e.c
 ieee/fp-cmp-5.c
@@ -823,6 +837,9 @@ ieee/fp-cmp-8.c
 ieee/fp-cmp-8e.c
 ieee/fp-cmp-9.c
 ieee/hugeval.c
+ieee/inf-1.c
+ieee/inf-2.c
+ieee/inf-3.c
 ieee/inf-4.c
 ieee/minuszero.c
 ieee/mul-subnormal-single-1.c
@@ -837,7 +854,9 @@ ieee/pr109008.c
 ieee/pr109386.c
 ieee/pr119002.c
 ieee/pr28634.c
+ieee/pr29302-1.c
 ieee/pr30704.c
+ieee/pr36332.c
 ieee/pr67218.c
 ieee/pr72824.c
 ieee/pr84235.c
@@ -1119,6 +1138,7 @@ pr44575.c
 pr44683.c
 pr44828.c
 pr44858.c
+pr44942.c
 pr45034.c
 pr45070.c
 pr45262.c
@@ -1401,12 +1421,15 @@ pta-field-2.c
 ptr-arith-1.c
 pure-1.c
 pushpop_macro.c
+regstack-1.c
 restrict-1.c
 scope-1.c
 shiftdi.c
 shiftopt-1.c
 signed1bitfield-1.c
 ssad-run.c
+stdarg-1.c
+stdarg-2.c
 stdarg-3.c
 stdarg-4.c
 strcmp-1.c
@@ -1459,6 +1482,8 @@ va-arg-23.c
 va-arg-24.c
 va-arg-26.c
 va-arg-4.c
+va-arg-5.c
+va-arg-6.c
 va-arg-7.c
 va-arg-8.c
 va-arg-9.c

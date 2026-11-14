@@ -110,6 +110,7 @@ func TestCompileSeeds(t *testing.T) {
 
 var compileSeeds = []string{
 	"int main(void) { return 0; }",
+	"long double g = 0.1L; long double f(long double x, int n, ...) { long double r = x * 2 + n; r += g; return r > 1 ? r : -r; } int main(void) { return (int)f(1.5L, 2) + !g; }",
 	"float f = 1.5f; double g(double d, float x) { return -d * x + (int)d; } int main(void) { double d = f; d /= 3; return g(d, 0.25f) < 1 && !d ? (unsigned)d : (long long)2.5e10; }",
 	"int main(void) { return 1 << 31; }",
 	"int main(void) { return (char)300; }",
