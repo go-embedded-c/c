@@ -16,7 +16,7 @@ import (
 // gccTortureFloor is how many gcc 15.2.0 gcc.c-torture/execute files we
 // compile, link and run with clang's exit status and output. A change of
 // the generator must not lower it.
-const gccTortureFloor = 1440 // builtins, measured 2026-11-10: 1440 same, 0 different, 3 known (function pointers: 1404, W7: 1381, compound literals: 1350, libc: 1327, W6: 1250, W5: 1160, W4d: 1049, W4c: 1005, W4b: 952, W4a: 762, W3: 454, W2: 10)
+const gccTortureFloor = 1472 // floating and byte builtins, measured 2026-11-11: 1472 same, 0 different, 3 known (computing builtins: 1440, function pointers: 1404, W7: 1381, compound literals: 1350, libc: 1327, W6: 1250, W5: 1160, W4d: 1049, W4c: 1005, W4b: 952, W4a: 762, W3: 454, W2: 10)
 
 // knownDifferent are files whose result differs from clang's for a reason
 // that is not the generator's, each examined. A file listed here that
