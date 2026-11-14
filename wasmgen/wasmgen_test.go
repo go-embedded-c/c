@@ -60,7 +60,7 @@ func TestUnsupported(t *testing.T) {
 		{"int f(int n) { int a[n]; return 0; } int main(void) { return f(2); }", "variable-length array"},
 		{"int main(void) { return __builtin_classify_type(1); }", "builtin __builtin_classify_type"},
 		{"int main(void) { return __builtin_imaxabs(-1); }", "builtin __builtin_imaxabs"},
-		{"int main(void) { return __builtin_nan(\"1\") != 0; }", "__builtin_nan of a string other than \"\""},
+		{"int main(void) { return __builtin_nan(\"0x1g\") != 0; }", "__builtin_nan of a string clang does not read as a number"},
 		{"int main(void) { __builtin_fabsl(1); return 0; }", "__builtin_fabsl"},
 		{"int main(void) { return __builtin_mul_overflow_p(1, 2, 0); }", "builtin __builtin_mul_overflow_p"},
 		{"int n = 2; void bar(char a[2][n]) { a[1][0] = 1; } int main(void) { return 0; }", "parameter of type pointer to array of char"},
@@ -339,6 +339,7 @@ func TestAgainstClang(t *testing.T) {
 		// every width, the quiet comparisons, the bit counts
 		builtinsProgram,
 		builtinsProgram2,
+		staticInitProgram,
 	} {
 		h.check(src)
 	}
@@ -408,6 +409,35 @@ int main(void) {
 	__builtin_fprintf(stdout, "[%s]\n", c);
 	__builtin_snprintf(c, 4, "%s", "truncated");
 	puts(c);
+	return 0;
+}
+`
+
+// staticInitProgram: address constants of members (C11 6.6p9), and the
+// floating builtins in static initializers, printed as their bits.
+const staticInitProgram = `#include <stdio.h>
+#include <string.h>
+struct in { char c; int k[3]; };
+struct s { short a; struct in in; int z; };
+union u { struct { char pad[5]; struct in b; } d; struct { int c; struct in b; } e; };
+struct s gs[3];
+union u gu;
+int *pk = &gs[1].in.k[2];
+struct in *pin = &gs[2].in;
+int *pk2 = gs[1].in.k + 1;
+int *pz = &(gs + 2)->z;
+char *pc = &((struct s *)gs)->in.c;
+struct in *pb = &gu.e.b, *pd = &gu.d.b;
+static const double dv[] = {__builtin_inf(), -__builtin_inf(), __builtin_nan(""), -__builtin_nan(""), __builtin_nan("0x1"), __builtin_nan("0X1"), __builtin_nan("017"), __builtin_nan("0b101"), __builtin_nan("0o7"), __builtin_nan("123456789"), __builtin_nan("0xfffffffffffffffffff"), __builtin_huge_val(), -2.5};
+static const float fv[] = {__builtin_inff(), -__builtin_inff(), __builtin_nanf(""), -__builtin_nanf("0x1"), __builtin_nanf("0xffffffff"), __builtin_huge_valf(), 0.1f};
+int main(void) {
+	unsigned long long b; unsigned w; int i; double x = __builtin_nan("0x2a"); float y = __builtin_nanf("077");
+	printf("%d %d %d %d %d %d %d\n", (int)((char *)pk - (char *)gs), (int)((char *)pin - (char *)gs), (int)((char *)pk2 - (char *)gs), (int)((char *)pz - (char *)gs), (int)(pc - (char *)gs), (int)((char *)pb - (char *)&gu), (int)((char *)pd - (char *)&gu));
+	for (i = 0; i < (int)(sizeof dv / sizeof dv[0]); i++) { memcpy(&b, &dv[i], 8); printf("%llx ", b); }
+	printf("\n");
+	for (i = 0; i < (int)(sizeof fv / sizeof fv[0]); i++) { memcpy(&w, &fv[i], 4); printf("%x ", w); }
+	memcpy(&b, &x, 8); memcpy(&w, &y, 4);
+	printf("\n%llx %x\n", b, w);
 	return 0;
 }
 `

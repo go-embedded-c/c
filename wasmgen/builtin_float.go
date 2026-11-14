@@ -60,9 +60,32 @@ func (g *fgen) fabsCopysign(x *cc.PostfixExpression, b string, args []cc.Express
 	return g.builtinResult(x, s)
 }
 
-// infNaN compiles inf, huge_val and nan(""): constants. nan with another
-// string (a payload) is refused.
+// infNaN compiles inf, huge_val and nan: constants.
 func (g *fgen) infNaN(x *cc.PostfixExpression, b string, args []cc.ExpressionNode) error {
+	bits, s, err := infNaNBits(x, b, args)
+	if err != nil {
+		return err
+	}
+	if s.vt == wasm.F32 {
+		g.op(opF32Const)
+		g.cur.code = binary.LittleEndian.AppendUint32(g.cur.code, uint32(bits))
+	} else {
+		g.op(opF64Const)
+		g.cur.code = binary.LittleEndian.AppendUint64(g.cur.code, bits)
+	}
+	return g.builtinResult(x, s)
+}
+
+// infNaNBits returns the representation of __builtin_b(args), b one of
+// inf, huge_val and nan with an f suffix or none, and its type.
+//
+// nan(s) is what clang folds it to (ExprConstant.cpp, TryEvaluateBuiltinNaN,
+// at llvmorg-23.1.4): s read whole by StringRef::getAsInteger with radix
+// 0 (0x, 0b, 0o, a leading 0 for octal, else decimal), "" as 0; then
+// IEEEFloat::makeNaN keeps the low precision-1 bits of that value as the
+// significand and sets the quiet bit, precision-2. A string clang cannot
+// read is not folded (it calls the library's nan); it is refused here.
+func infNaNBits(x *cc.PostfixExpression, b string, args []cc.ExpressionNode) (uint64, scalar, error) {
 	base := "inf"
 	switch {
 	case strings.HasPrefix(b, "huge_val"):
@@ -72,31 +95,121 @@ func (g *fgen) infNaN(x *cc.PostfixExpression, b string, args []cc.ExpressionNod
 	}
 	s, err := floatOf(x, b, base)
 	if err != nil {
-		return err
+		return 0, s, err
 	}
 	if base != "nan" {
 		if len(args) != 0 {
-			return unsupported(x, "__builtin_"+b+" with arguments")
+			return 0, s, unsupported(x, "__builtin_"+b+" with arguments")
 		}
-		g.constF(math.Inf(1), s)
-		return g.builtinResult(x, s)
+		if s.vt == wasm.F32 {
+			return uint64(math.Float32bits(float32(math.Inf(1)))), s, nil
+		}
+		return math.Float64bits(math.Inf(1)), s, nil
 	}
 	if len(args) != 1 {
-		return unsupported(x, "__builtin_"+b+" with another number of arguments")
+		return 0, s, unsupported(x, "__builtin_"+b+" with another number of arguments")
 	}
-	p, ok := strip(args[0]).(*cc.PrimaryExpression)
-	if !ok || p.Case != cc.PrimaryExpressionString || p.Token.SrcStr() != `""` {
-		return unsupported(x, "__builtin_"+b+" of a string other than \"\"")
+	str, ok := stringValue(args[0])
+	if !ok {
+		return 0, s, unsupported(x, "__builtin_"+b+" of something other than a string literal")
 	}
-	// The default quiet NaN, positive, without payload (IEEE 754 6.2.1).
+	fill, ok := nanPayload(strings.TrimSuffix(str, "\x00"))
+	if !ok {
+		return 0, s, unsupported(x, "__builtin_"+b+" of a string clang does not read as a number")
+	}
 	if s.vt == wasm.F32 {
-		g.op(opF32Const)
-		g.cur.code = binary.LittleEndian.AppendUint32(g.cur.code, 0x7fc00000)
-	} else {
-		g.op(opF64Const)
-		g.cur.code = binary.LittleEndian.AppendUint64(g.cur.code, 0x7ff8000000000000)
+		return 0x7f800000 | fill&(1<<23-1) | 1<<22, s, nil
 	}
-	return g.builtinResult(x, s)
+	return 0x7ff0000000000000 | fill&(1<<52-1) | 1<<51, s, nil
+}
+
+// nanPayload reads s as StringRef::getAsInteger(0, …) does, returning the
+// value modulo 2^64: only its low bits are kept, and multiplying and adding
+// modulo 2^64 gives the low bits of the exact value.
+func nanPayload(s string) (uint64, bool) {
+	if s == "" {
+		return 0, true
+	}
+	radix := uint64(10)
+	switch {
+	case len(s) >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'):
+		radix, s = 16, s[2:]
+	case len(s) >= 2 && s[0] == '0' && (s[1] == 'b' || s[1] == 'B'):
+		radix, s = 2, s[2:]
+	case len(s) >= 2 && s[0] == '0' && s[1] == 'o':
+		radix, s = 8, s[2:]
+	case len(s) >= 2 && s[0] == '0' && s[1] >= '0' && s[1] <= '9':
+		radix, s = 8, s[1:]
+	}
+	if s == "" {
+		return 0, false
+	}
+	var v uint64
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		var d uint64
+		switch {
+		case c >= '0' && c <= '9':
+			d = uint64(c - '0')
+		case c >= 'a' && c <= 'z':
+			d = uint64(c-'a') + 10
+		case c >= 'A' && c <= 'Z':
+			d = uint64(c-'A') + 10
+		default:
+			return 0, false
+		}
+		if d >= radix {
+			return 0, false
+		}
+		v = v*radix + d
+	}
+	return v, true
+}
+
+// staticFloatBits returns the representation in s of the constant
+// floating initializer e: a literal or a folded expression, or inf,
+// huge_val or nan, possibly negated. The builtins are read as bits, not
+// through a float64: converting a NaN to float32 need not keep its
+// payload.
+func staticFloatBits(e cc.ExpressionNode, s scalar) (uint64, bool) {
+	e = strip(e)
+	sign := uint64(1) << 63
+	if s.vt == wasm.F32 {
+		sign = 1 << 31
+	}
+	if u, ok := e.(*cc.UnaryExpression); ok && u.Case == cc.UnaryExpressionMinus {
+		if fs, ok := floatScalarOf(u.CastExpression.Type()); ok && fs.vt == s.vt {
+			if v, ok := staticFloatBits(u.CastExpression, s); ok {
+				return v ^ sign, true
+			}
+		}
+	}
+	if x, ok := e.(*cc.PostfixExpression); ok && x.Case == cc.PostfixExpressionCall {
+		if d := functionDesignator(x.PostfixExpression); d != nil {
+			if b, ok := strings.CutPrefix(d.Name(), "__builtin_"); ok {
+				var args []cc.ExpressionNode
+				for l := x.ArgumentExpressionList; l != nil; l = l.ArgumentExpressionList {
+					args = append(args, l.AssignmentExpression)
+				}
+				switch b {
+				case "inf", "inff", "huge_val", "huge_valf", "nan", "nanf":
+					bits, bs, err := infNaNBits(x, b, args)
+					if err == nil && bs.vt == s.vt {
+						return bits, true
+					}
+					return 0, false
+				}
+			}
+		}
+	}
+	v, ok := floatConst(e)
+	if !ok {
+		return 0, false
+	}
+	if s.vt == wasm.F32 {
+		return uint64(math.Float32bits(float32(v))), true
+	}
+	return math.Float64bits(v), true
 }
 
 // classify compiles isinf, isfinite, isnan and signbit of a float or a
