@@ -152,7 +152,10 @@ func corpusRate(t *testing.T, env string, lvl cparse.Level, floor int) {
 }
 
 func TestCorpusCTestsuite(t *testing.T) { corpusRate(t, "CORACLE_CTESTSUITE", cparse.Check, 217) }
-func TestCorpusGCCTorture(t *testing.T) { corpusRate(t, "CORACLE_GCC_TORTURE", cparse.Check, 1881) }
+
+// 1881 until the mode attribute was refused (2026-11-14): the 14 files that
+// use it type-checked with the attribute ignored, the wrong sizes.
+func TestCorpusGCCTorture(t *testing.T) { corpusRate(t, "CORACLE_GCC_TORTURE", cparse.Check, 1867) }
 
 // FuzzSource: the front end is fed untrusted text. It may refuse anything;
 // it must not panic.
@@ -215,6 +218,26 @@ func TestEmptyVariadicArguments(t *testing.T) {
 		} else if err != nil {
 			t.Errorf("%q: %v", src, err)
 		}
+	}
+}
+
+// TestModeAttributeRefused: cc/v4 ignored __attribute__((mode(QI))), so the
+// type kept its declared size (4 bytes where clang gives 1); the generator
+// then wrote past packed members (gcc torture memclr.c, misalign.c). The
+// patch refuses it; another attribute on the same typedef is the control.
+func TestModeAttributeRefused(t *testing.T) {
+	for _, src := range []string{
+		"typedef unsigned int __attribute__((mode(QI))) u8;",
+		"typedef unsigned int __attribute__((__mode__(__DI__))) u64;",
+		"typedef int __attribute__ ((mode (SI))) i32;",
+	} {
+		err := front(t).Source("m.c", []byte(src), cparse.Check)
+		if err == nil || !strings.Contains(err.Error(), "attribute mode is not supported") {
+			t.Errorf("%q: %v, want the mode attribute refused", src, err)
+		}
+	}
+	if err := front(t).Source("m.c", []byte("typedef unsigned int __attribute__((aligned(8))) u;"), cparse.Check); err != nil {
+		t.Errorf("control: %v", err)
 	}
 }
 

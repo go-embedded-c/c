@@ -213,6 +213,15 @@ var patches = []filePatch{
 		Old:  "\tif fi == nil {\n\t\tif fi, err = os.Stat(fn); err != nil {\n",
 		New:  "\tif fi == nil {\n\t\tif c.cfg.FS != nil {\n\t\t\treturn false\n\t\t}\n\n\t\tif fi, err = os.Stat(fn); err != nil {\n",
 	},
+	{
+		File: "check.go",
+		Why:  "__attribute__((mode(QI))) was ignored: `unsigned int __attribute__((mode(QI)))` stayed 4 bytes where clang makes it 1, and memclr.c and misalign.c wrote past their packed members; refused until it is implemented",
+		Old:  "\t\tcase\n\t\t\t\"__aligned__\",\n\t\t\t\"aligned\":\n",
+		New: "\t\tcase\n\t\t\t\"__mode__\",\n\t\t\t\"mode\":\n\n" +
+			"\t\t\tc.errors.add(errorf(\"%v: attribute mode is not supported\", n.Position()))\n" +
+			"\t\t\treturn\n" +
+			"\t\tcase\n\t\t\t\"__aligned__\",\n\t\t\t\"aligned\":\n",
+	},
 }
 
 // budgetGo is added to the package: the error and the check the patches call.

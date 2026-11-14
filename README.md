@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float`, `double` and `long double` (binary128), bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), and address constants of members (`&s.m`, `&p->m`). 1502 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float`, `double` and `long double` (binary128), bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), and `asm` statements with an empty template. 1552 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -289,6 +289,29 @@ W6 adds bit-fields:
 - A bit-field of a type wider than `int` but narrower than 32 bits is
   refused. cc/v4 types it `int`, while clang keeps its declared type.
 
+`asm` statements with an empty template, the optimisation barriers of the
+gcc torture tests (`asm volatile ("" : : : "memory")`, `asm ("" : "+r" (x))`,
+`asm ("" : "=r" (x) : "0" (y))`), compile to what their operands say, since
+no instruction runs:
+
+- an input is evaluated;
+- a `+` output keeps its value, its lvalue evaluated once;
+- a `=` output tied to an input by its number receives that input, as
+  their shared register carries it through;
+- an untied `=m` output keeps its value;
+- clobbers do nothing, since the generator keeps no value in a register
+  across statements.
+
+Refused: a template that is not empty, a named operand, `asm goto`, and an
+untied `=` output that is not memory, whose value would be whatever the
+register held.
+
+The attribute `mode` (`unsigned int __attribute__((mode(QI)))`) is refused
+by the front end. cc/v4 ignored it, so the type kept its declared size
+(4 bytes where clang makes it 1). Hidden until now behind the `asm`
+refusal, it made `memclr.c` and `misalign.c` write past packed members.
+Six files that used it agreed with clang by chance and are refused with it.
+
 Function pointers:
 
 - A function's address is its index in the indirect function table,
@@ -409,8 +432,10 @@ does for structures, is the fifth):
   misaligning a `long long` in the varargs buffer, on the side that is
   ours.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-14, with `long double`, 1502 files ran the same as under clang
-  (1477 with static member addresses and the floating-point builtins in
+  2026-11-14, with the empty-template `asm` statements, 1552 files ran the
+  same as under clang: 56 gained, and 6 lost to the refusal of the `mode`
+  attribute, which only agreed with clang by chance (1502 with
+  `long double`, 1477 with static member addresses and the floating-point builtins in
   static initializers, 1472 with the floating-point and byte builtins, 1440 with the computing builtins,
   1404 with function pointers, 1381 after W7, 1350 with compound literals,
   1327 with the library builtins, 1250 after W6, 1160 after W5, 1049 after

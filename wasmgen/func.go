@@ -335,6 +335,8 @@ func (g *fgen) statement(s *cc.Statement) error {
 		return g.labeled(s.LabeledStatement)
 	case cc.StatementJump:
 		return g.jumpStatement(s.JumpStatement)
+	case cc.StatementAsm:
+		return g.asmStatement(s.AsmStatement)
 	}
 	return unsupported(s, "statement "+s.Case.String())
 }
