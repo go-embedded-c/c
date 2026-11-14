@@ -96,11 +96,12 @@ func (m *module) staticValue(e cc.ExpressionNode, t cc.Type, seg *wasm.Segment, 
 		return unsupported(e, "initializer of type "+typeName(t))
 	}
 	if s.isFloat {
-		v, ok := floatConst(e)
+		bits, ok := staticFloatBits(e, s)
 		if !ok {
 			return unsupported(e, "non-constant initializer")
 		}
-		copy(seg.Init[off:], floatBytes(v, s))
+		b := binary.LittleEndian.AppendUint64(nil, bits)
+		copy(seg.Init[off:], b[:s.bits/8])
 		return nil
 	}
 	if s.ptr {
@@ -217,10 +218,13 @@ func (m *module) staticAddr(e cc.ExpressionNode) (uint32, int64, error) {
 			}
 		}
 	case *cc.PostfixExpression:
-		// a[1] of char a[2][5], (int[2]){1, 2}: an array, converted to
-		// its address.
-		if (x.Case == cc.PostfixExpressionIndex || x.Case == cc.PostfixExpressionComplit) && designatesArray(x) {
-			return m.staticLvalue(x)
+		// a[1] of char a[2][5], (int[2]){1, 2}, s.arr, p->arr: an array,
+		// converted to its address.
+		switch x.Case {
+		case cc.PostfixExpressionIndex, cc.PostfixExpressionComplit, cc.PostfixExpressionSelect, cc.PostfixExpressionPSelect:
+			if designatesArray(x) {
+				return m.staticLvalue(x)
+			}
 		}
 	case *cc.CastExpression:
 		if s, ok := scalarOf(x.Type()); ok && s.bits == 32 {
@@ -252,6 +256,37 @@ func (m *module) staticAddr(e cc.ExpressionNode) (uint32, int64, error) {
 
 func isPtrOrArray(t cc.Type) bool { return t.Kind() == cc.Ptr || t.Kind() == cc.Array }
 
+// staticMember is the address of the member x of a static structure or
+// union: s.m, or p->m with p an address constant.
+func (m *module) staticMember(x *cc.PostfixExpression) (uint32, int64, error) {
+	f := x.Field()
+	if f == nil {
+		return 0, 0, unsupported(x, "member")
+	}
+	if f.IsBitfield() {
+		return 0, 0, unsupported(x, "address of a bit-field")
+	}
+	base := x.PostfixExpression.Type()
+	if x.Case == cc.PostfixExpressionPSelect {
+		base = elemOf(base)
+	}
+	if hasVLA(base) {
+		return 0, 0, unsupported(x, "member of a structure with a variable-length array")
+	}
+	if !m.layoutOK(base) {
+		return 0, 0, unsupported(x, layoutRefusal)
+	}
+	var sym uint32
+	var addend int64
+	var err error
+	if x.Case == cc.PostfixExpressionSelect {
+		sym, addend, err = m.staticLvalue(x.PostfixExpression)
+	} else {
+		sym, addend, err = m.staticAddr(x.PostfixExpression)
+	}
+	return sym, addend + f.Offset(), err
+}
+
 // staticLvalue is the address of a static lvalue: x, a[k], *(&…).
 func (m *module) staticLvalue(e cc.ExpressionNode) (uint32, int64, error) {
 	e = strip(e)
@@ -278,6 +313,11 @@ func (m *module) staticLvalue(e cc.ExpressionNode) (uint32, int64, error) {
 				sym, addend, err := m.staticAddr(x.PostfixExpression)
 				return sym, addend + k*elemOf(x.PostfixExpression.Type()).Size(), err
 			}
+		}
+		if x.Case == cc.PostfixExpressionSelect || x.Case == cc.PostfixExpressionPSelect {
+			// &s.m and &p->m: the structure's address plus the member's
+			// offset (C11 6.6p9), as memberAddr computes it at run time.
+			return m.staticMember(x)
 		}
 	case *cc.UnaryExpression:
 		if x.Case == cc.UnaryExpressionDeref {

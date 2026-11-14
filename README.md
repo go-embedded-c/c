@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float` and `double`, bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`). 1472 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float` and `double`, bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), and address constants of members (`&s.m`, `&p->m`). 1477 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -320,7 +320,13 @@ what clang 23.1.4 emits for wasm32:
   forms are refused):
   - `fabs` and `copysign`;
   - `inf` and `huge_val`;
-  - `nan("")`; a NaN payload is refused;
+  - `nan(s)` with the payload clang gives it: `s` read as an integer
+    (`0x`, `0b`, `0o`, a leading `0` for octal, else decimal), its low
+    significand bits kept, and the quiet bit set (`TryEvaluateBuiltinNaN`
+    and `IEEEFloat::makeNaN`, LLVM 23.1.4). A string clang cannot read is
+    refused;
+  - all of these also in static initializers, negated or not, written as
+    bits;
   - `isinf`, `isfinite`, `isnan` and `signbit`.
 - Byte builtins: `ffs` (plain, `l` and `ll`) and `bswap16/32/64`.
 - Library functions called by their `__builtin_` name go to wasi-libc:
@@ -365,14 +371,24 @@ Four tests check the generator:
   misaligning a `long long` in the varargs buffer, on the side that is
   ours.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-11, with the floating-point and byte builtins, 1472 files ran the
-  same as under clang (1440 with the computing builtins, 1404 with function
-  pointers, 1381 after W7, 1350 with compound literals, 1327 with the library builtins, 1250 after W6, 1160
-  after W5, 1049 after W4d, 1005 after W4c, 952 after W4b, 762 after W4a,
-  454 after W3, 10 after W2). The test holds that count as a floor and
-  logs the refusals by cause, with three files for each. `asm`
-  statements, `__builtin_longjmp` and nested functions are now the most
-  common. It also names each file clang refuses that we compile.
+  2026-11-14, with static member addresses and the floating-point builtins
+  in static initializers, 1477 files ran the same as under clang (1472 with
+  the floating-point and byte builtins, 1440 with the computing builtins,
+  1404 with function pointers, 1381 after W7, 1350 with compound literals,
+  1327 with the library builtins, 1250 after W6, 1160 after W5, 1049 after
+  W4d, 1005 after W4c, 952 after W4b, 762 after W4a, 454 after W3, 10 after
+  W2). The test holds that count as a floor and logs the refusals by cause,
+  with three files for each. `asm` statements, `__builtin_longjmp` and
+  nested functions are now the most common. It also names each file clang
+  refuses that we compile.
+  - The files that ran the same are also listed, one per line, in
+    `wasmgen/testdata/gcc-torture-same.txt`. The test fails for each listed
+    file that stops running the same, and for each file that starts to run
+    the same without being listed. `CORACLE_WRITE_SAME=1` rewrites the list.
+    A count can rise while one file is lost: the builtins wave lost
+    `pr22061-2.c` while it gained 37 others, and nothing failed. Checked
+    this way, the floating-point and byte builtins gained 32 files and lost
+    none, and the static member addresses gained 5 and lost none.
   - No other file differs. There are three known differences:
     - `shiftdi-2.c` comes from the oracle compiling with `-std=gnu89`,
       where a large decimal constant has another type (#20);

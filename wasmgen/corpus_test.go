@@ -16,7 +16,7 @@ import (
 // gccTortureFloor is how many gcc 15.2.0 gcc.c-torture/execute files we
 // compile, link and run with clang's exit status and output. A change of
 // the generator must not lower it.
-const gccTortureFloor = 1472 // floating and byte builtins, measured 2026-11-11: 1472 same, 0 different, 3 known (computing builtins: 1440, function pointers: 1404, W7: 1381, compound literals: 1350, libc: 1327, W6: 1250, W5: 1160, W4d: 1049, W4c: 1005, W4b: 952, W4a: 762, W3: 454, W2: 10)
+const gccTortureFloor = 1477 // static member addresses and floating builtins, measured 2026-11-14: 1477 same, 0 different, 3 known (floating and byte builtins: 1472, computing builtins: 1440, function pointers: 1404, W7: 1381, compound literals: 1350, libc: 1327, W6: 1250, W5: 1160, W4d: 1049, W4c: 1005, W4b: 952, W4a: 762, W3: 454, W2: 10)
 
 // knownDifferent are files whose result differs from clang's for a reason
 // that is not the generator's, each examined. A file listed here that
@@ -59,19 +59,27 @@ func TestCorpusGCCTorture(t *testing.T) {
 	pass, frontRefused, differ := 0, 0, []string{}
 	causes := map[string]int{}
 	examples := map[string][]string{} // the first files of each cause
+	fate := map[string]string{}       // by path under dir: "same", or what happened
 	for _, p := range files {
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel = filepath.ToSlash(rel)
 		src, err := os.ReadFile(p)
 		if err != nil {
 			t.Fatal(err)
 		}
 		ast, err := h.front.Translate(p, src)
 		if err != nil {
+			fate[rel] = "refused by the front end"
 			frontRefused++
 			continue
 		}
 		obj, err := wasmgen.Compile(ast, p)
 		var u *wasmgen.Unsupported
 		if errors.As(err, &u) {
+			fate[rel] = "refused: " + u.What
 			causes[u.What]++
 			if len(examples[u.What]) < 3 {
 				examples[u.What] = append(examples[u.What], filepath.Base(p))
@@ -79,16 +87,19 @@ func TestCorpusGCCTorture(t *testing.T) {
 			continue
 		}
 		if err != nil {
+			fate[rel] = "error"
 			t.Errorf("%s: %v", p, err)
 			continue
 		}
 		mod, err := h.tc.Link(context.Background(), obj)
 		if err != nil {
+			fate[rel] = "link: " + firstLine(err.Error())
 			causes["link: "+firstLine(err.Error())]++
 			continue
 		}
 		a, err := h.r.Run(context.Background(), mod, nil, nil)
 		if err != nil {
+			fate[rel] = "error"
 			t.Errorf("%s: %v", p, err)
 			continue
 		}
@@ -96,16 +107,19 @@ func TestCorpusGCCTorture(t *testing.T) {
 		if err != nil {
 			// We compiled it and clang did not: name it, so the count can be
 			// followed back to the files.
+			fate[rel] = "refused by clang"
 			t.Logf("refused by clang, compiled by us: %s: %s", filepath.Base(p), firstLine(err.Error()))
 			frontRefused++
 			continue
 		}
 		name := filepath.Base(p)
 		_, known := knownDifferent[name]
+		fate[rel] = "different"
 		switch {
 		case same(a, b) && known:
 			t.Errorf("%s agrees with clang now: drop it from knownDifferent", name)
 		case same(a, b):
+			fate[rel] = "same"
 			pass++
 		case known:
 			t.Logf("known difference: %s: %s", name, knownDifferent[name])
@@ -137,6 +151,53 @@ func TestCorpusGCCTorture(t *testing.T) {
 	}
 	if pass < gccTortureFloor {
 		t.Errorf("%d files the same as clang, the floor is %d", pass, gccTortureFloor)
+	}
+	checkSameList(t, fate)
+}
+
+// sameList holds, one per line, the torture files that ran the same as
+// under clang. A count cannot show a file that stopped agreeing while
+// another started (pr22061-2.c went from the same to refused in the
+// builtins wave, and the count still rose); the list names each one.
+const sameList = "testdata/gcc-torture-same.txt"
+
+// checkSameList fails for each listed file that no longer runs the same as
+// under clang, and names those that newly do. With CORACLE_WRITE_SAME=1 it
+// writes the list from this run instead.
+func checkSameList(t *testing.T, fate map[string]string) {
+	t.Helper()
+	var now []string
+	for f, v := range fate {
+		if v == "same" {
+			now = append(now, f)
+		}
+	}
+	sort.Strings(now)
+	if os.Getenv("CORACLE_WRITE_SAME") == "1" {
+		if err := os.WriteFile(sameList, []byte(strings.Join(now, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("wrote %s: %d files", sameList, len(now))
+		return
+	}
+	data, err := os.ReadFile(sameList)
+	if err != nil {
+		t.Fatalf("%v (write it with CORACLE_WRITE_SAME=1)", err)
+	}
+	listed := map[string]bool{}
+	for _, f := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		listed[f] = true
+		switch v, ok := fate[f]; {
+		case !ok:
+			t.Errorf("%s was the same as clang and is not in the corpus any more", f)
+		case v != "same":
+			t.Errorf("%s was the same as clang, now %s", f, v)
+		}
+	}
+	for _, f := range now {
+		if !listed[f] {
+			t.Errorf("%s is the same as clang now and not in %s: write the list with CORACLE_WRITE_SAME=1", f, sameList)
+		}
 	}
 }
 
