@@ -62,6 +62,8 @@ func TestUnsupported(t *testing.T) {
 		{"int f(); int g(int (*p)()) { return p(1); } int main(void) { return 0; }", "call through a pointer to a function without a prototype"},
 		{"int f(int n) { int a[n]; return 0; } int main(void) { return f(2); }", "variable-length array"},
 		{"int main(void) { return __builtin_classify_type(1); }", "builtin __builtin_classify_type"},
+		{"int main(void) { asm (\"nop\"); return 0; }", "asm with a template"},
+		{"int main(void) { int x; asm (\"\" : \"=r\" (x)); return x; }", "asm output that no input gives a value"},
 		{"int main(void) { return __builtin_imaxabs(-1); }", "builtin __builtin_imaxabs"},
 		{"int main(void) { return __builtin_nan(\"0x1g\") != 0; }", "__builtin_nan of a string clang does not read as a number"},
 		{"int main(void) { return __builtin_signbitl(1.0); }", "__builtin_signbitl of double"},
@@ -344,6 +346,7 @@ func TestAgainstClang(t *testing.T) {
 		builtinsProgram,
 		builtinsProgram2,
 		staticInitProgram,
+		asmProgram,
 		// long double (binary128): storage, parameters, results, every
 		// operation, comparison and conversion, varargs
 		quadProgram,
@@ -423,6 +426,30 @@ int main(void) {
 
 // staticInitProgram: address constants of members (C11 6.6p9), and the
 // floating builtins in static initializers, printed as their bits.
+// asmProgram: asm statements with an empty template, the optimisation
+// barriers of the gcc torture tests: inputs evaluated, "+" outputs
+// unchanged, "=" outputs given their tied input.
+const asmProgram = `#include <stdio.h>
+int calls;
+int *bump(int *p) { calls++; return p; }
+int main(void) {
+	int x = 7, y = 40, z, w = 3; long long l = 1LL << 40, m; char *p, buf[4] = "abc"; unsigned char c = 200; int i;
+	asm volatile ("" : : : "memory");
+	asm ("");
+	asm volatile ("" : : "r" (x), "r" (*bump(&y)) : "memory");
+	asm ("" : "+r" (x));
+	asm ("" : "+r" (*bump(&w)));
+	asm ("" : "=r" (z) : "0" (y + 2));
+	asm ("" : "=r" (m) : "0" (l));
+	asm ("" : "=r" (p) : "0" (buf));
+	asm ("" : "=r" (i) : "0" (c));
+	asm volatile ("" : "=r" (c) : "0" (300));
+	asm ("" : "=r" (x), "=r" (y) : "1" (5), "0" (6));
+	printf("%d %d %d %d %lld %s %d %d %d\n", x, y, z, w, m, p, i, c, calls);
+	return 0;
+}
+`
+
 const staticInitProgram = `#include <stdio.h>
 #include <string.h>
 struct in { char c; int k[3]; };

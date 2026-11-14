@@ -2816,6 +2816,12 @@ func (n *AttributeValue) check(c *ctx, attr *Attributes) {
 				}
 			}
 		case
+			"__mode__",
+			"mode":
+
+			c.errors.add(errorf("%v: attribute mode is not supported", n.Position()))
+			return
+		case
 			"__aligned__",
 			"aligned":
 
