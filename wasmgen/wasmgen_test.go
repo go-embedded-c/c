@@ -806,7 +806,10 @@ int main(void) {
 // promotion: the element wraps), the unary operators (-0.0 too), the
 // comparisons (-1 or 0, a NaN unordered), elements as values and lvalues,
 // op=, casts between vectors and from and to a scalar, parameters and results, a
-// static and a local initialiser, a compound literal, a member, ?:.
+// static and a local initialiser, a compound literal, a member, ?:. No NaN
+// that arithmetic produced is printed: wasm leaves its sign to the machine
+// (0.0 / 0.0 computed at run time was -nan on the x86 CI runner, nan on an
+// arm64 Mac; clang folds it to nan).
 const vectorProgram = `#include <stdio.h>
 typedef int v4si __attribute__((vector_size(16)));
 typedef unsigned short v4hu __attribute__((vector_size(8)));
@@ -832,7 +835,7 @@ int main(void) {
 	v8qi q = {127, -128, 1, 2, 3, 4, 5, -6};
 	v2di l = {1LL << 40, -3};
 	v4sf f = {1.5f, -0.0f, 3.0f, 0.0f};
-	v2df d = {0.0 / 0.0, 2.0};
+	v2df d = {__builtin_nan(""), 2.0};
 	struct S s;
 	int i;
 	pi("add", gi + j); pi("sub", gi - j); pi("mul", gi * j); pi("div", gi / j); pi("rem", gi % j);
@@ -846,7 +849,7 @@ int main(void) {
 	pdi("ladd", l + l); pdi("lmul", l * 3); pdi("lshr", l >> 4); pdi("llt", l < 0);
 	psf("fadd", f + 1.0f); psf("fmul", f * f); psf("fdiv", 1.0f / f); psf("fneg", -f); psf("fpos", +f);
 	pi("flt", f < 1.0f); pi("feq", f == 0.0f);
-	pdf("dadd", d + gd); pdf("dneg", -d); pdi("deq", d == d); pdi("dne", d != d); pdi("dlt", d < 3.0);
+	pdf("dadd", gd + gd); pdf("dneg", -d); pdi("deq", d == d); pdi("dne", d != d); pdi("dlt", d < 3.0);
 	k = gi; k[2] = 99; k[0] += 5; pi("elem", k);
 	k += j; k *= 2; k -= 1; k <<= 1; k >>= 2; k &= 255; k |= 1; k ^= 3; k /= 3; k %= 5; pi("op=", k);
 	f *= 2.0f; f /= 4.0f; psf("fop=", f);
