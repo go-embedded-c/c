@@ -5198,8 +5198,13 @@ func (n *PostfixExpression) fieldType(c *ctx, f *Field) (r Type) {
 	switch r = f.Type(); x := r.(type) {
 	case *PredefinedType:
 		if f.IsBitfield() {
-			if f.ValueBits() < c.intT.Size()*8 {
+			switch w := c.intT.Size() * 8; {
+			case f.ValueBits() < w:
 				x = c.intT.(*PredefinedType)
+			case f.ValueBits() == w && IsSignedInteger(x):
+				x = c.intT.(*PredefinedType)
+			case f.ValueBits() == w:
+				x = c.ast.kinds[UInt].(*PredefinedType)
 			}
 			x = x.clone().(*PredefinedType)
 			x.bitField = f

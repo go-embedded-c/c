@@ -53,13 +53,10 @@ func unitOf(n cc.Node, f *cc.Field) (bitunit, error) {
 	if u.bits <= 0 || u.off < 0 || u.off+u.bits > u.bytes*8 {
 		return u, unsupported(n, "bit-field outside its storage unit")
 	}
-	if f.Type().Size() > 4 && u.bits < 32 {
-		// cc/v4 types every bit-field narrower than int as int
-		// (check.go, fieldType); clang keeps long long for a long long
-		// x:24, so the arithmetic on it and the argument it makes to `...`
-		// would differ.
-		return u, unsupported(n, "bit-field of a type wider than int, narrower than int")
-	}
+	// A bit-field of a type wider than int whose width is at most int's
+	// (long long x:24) promotes to int, as in clang (isPromotableBitField):
+	// the value is extracted in its 64-bit unit and converted to the
+	// expression's type by the caller.
 	return u, nil
 }
 
