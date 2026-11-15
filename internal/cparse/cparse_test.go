@@ -115,11 +115,11 @@ func TestGeneratePredefinedMatchesCommitted(t *testing.T) {
 }
 
 // The corpora: how many files cc/v4 takes. A front-end bump must not lower
-// the floors. gcc 15.2.0 torture: 1866 / 1890. Eight of the refusals are
+// the floors. gcc 15.2.0 torture: 1879 / 1890. Eight of the refusals are
 // wasi-libc's own #error (signal.h, setjmp.h, sys/mman.h), which clang
 // refuses too; pr117432.c uses C23 `f(...)` with no named parameter, which
-// cc/v4 does not take; the others are a packed bit-field or a mode on a vector
-// type, not implemented. The refused files are logged, the first twenty.
+// cc/v4 does not take; pr23135.c and simd-1.c put a mode on a vector type,
+// not implemented. The refused files are logged, the first twenty.
 func corpusRate(t *testing.T, env string, lvl cparse.Level, floor int) {
 	dir := oracletest.Dir(t, env)
 	tc := oracletest.Require(t)
@@ -156,9 +156,9 @@ func TestCorpusCTestsuite(t *testing.T) { corpusRate(t, "CORACLE_CTESTSUITE", cp
 
 // 1881 while cc/v4 ignored the mode and packed attributes, with the wrong
 // sizes; 1867 with mode refused (2026-11-14); 1866 with both implemented
-// (2026-11-15), a packed bit-field and a mode on a vector type refused
-// (go-embedded-c/c#42).
-func TestCorpusGCCTorture(t *testing.T) { corpusRate(t, "CORACLE_GCC_TORTURE", cparse.Check, 1866) }
+// (2026-11-15), a packed bit-field refused; 1879 with the Itanium bit-field
+// layout, packed bit-fields included (go-embedded-c/c#29).
+func TestCorpusGCCTorture(t *testing.T) { corpusRate(t, "CORACLE_GCC_TORTURE", cparse.Check, 1879) }
 
 // FuzzSource: the front end is fed untrusted text. It may refuse anything;
 // it must not panic.
@@ -170,6 +170,7 @@ func FuzzSource(f *testing.F) {
 	f.Add([]byte("_Static_assert(sizeof(long) == 4, \"ilp32\");\nvoid g(void) { goto l; l: switch (1) { default: break; } }"))
 	f.Add([]byte(modeSource))
 	f.Add([]byte(packedSource))
+	f.Add([]byte(bitfieldSource))
 	f.Fuzz(func(t *testing.T, src []byte) {
 		if len(src) > 4096 {
 			return
@@ -327,6 +328,34 @@ _Static_assert(offsetof(struct n2, m) == 4 && sizeof(struct n2) == 12, "a packed
 _Static_assert(offsetof(struct p7, b) == 2 && offsetof(struct p8, a) == 4 && sizeof(struct p8) == 12, "after the last declarator only");
 `
 
+// bitfieldSource: bit-fields laid out by the Itanium rule, packed or not.
+// clang 23.1.4 (wasm32-wasip1, -std=gnu17 -fsyntax-only) holds every
+// assertion, measured 2026-11-15; cc/v4's group allocator gave struct s29
+// size 16 and h at 8 (go-embedded-c/c#29).
+const bitfieldSource = `#define offsetof(t, m) __builtin_offsetof(t, m)
+struct s29 { unsigned long long f:44; _Bool g:1; short h; };
+struct __attribute__((packed)) pk { int g:31; int h:6; char c; };
+struct pk2 { char a; unsigned long w:32 __attribute__((packed)); char b; };
+struct anon { char a; int :4; char b; };
+union u { char c; int :20; };
+struct cross { int a:30; int b:10; char c; };
+_Static_assert(offsetof(struct cross, c) == 6 && sizeof(struct cross) == 8, "a bit-field does not straddle its type's alignment");
+_Static_assert(sizeof(struct s29) == 8 && offsetof(struct s29, h) == 6, "go-embedded-c/c#29");
+_Static_assert(sizeof(struct pk) == 6 && _Alignof(struct pk) == 1 && offsetof(struct pk, c) == 5, "packed bit-fields");
+_Static_assert(sizeof(struct pk2) == 6 && offsetof(struct pk2, b) == 5, "a packed bit-field member");
+_Static_assert(sizeof(struct anon) == 3 && _Alignof(struct anon) == 1, "an unnamed bit-field does not align");
+_Static_assert(sizeof(union u) == 3 && _Alignof(union u) == 1, "nor a union");
+`
+
+// TestBitfieldLayout: the constant sizeof, _Alignof and offsetof of
+// structures with bit-fields, which cc/v4 folds itself and which no
+// generator-side check could catch (go-embedded-c/c#29).
+func TestBitfieldLayout(t *testing.T) {
+	if err := front(t).Source("b.c", []byte(bitfieldSource), cparse.Check); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestPackedAttribute: cc/v4 ignored __attribute__((packed)), and a packed
 // struct kept an unpacked layout (sizeof 24 where clang gives 11; gcc torture
 // misalign.c wrote past its member). The patch packs the members of a packed
@@ -337,8 +366,6 @@ func TestPackedAttribute(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, k := range []struct{ src, msg string }{
-		{"struct __attribute__((packed)) s { int g : 31; int h : 6; };", "attribute packed on a bit-field is not supported"},
-		{"struct s { unsigned long w : 32 __attribute__((packed)); };", "attribute packed"},
 		{"enum e { A, B } __attribute__((packed));", "attribute packed is not supported here"},
 		{"__attribute__((packed)) int x;", "attribute packed is not supported here"},
 		{"struct s { __attribute__((packed)) int x; };", "attribute packed is not supported here"},

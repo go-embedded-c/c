@@ -6,8 +6,8 @@ package cc
 // __attribute__((packed)) on the definition of a struct or union is packed on
 // each member; a packed member has alignment 1 unless an aligned attribute
 // asks more (GCC manual, Common Attributes, packed). cc/v4 ignored it
-// (go-embedded-c patch). Bit-fields of a packed struct, a packed bit-field
-// and a packed enum are refused until implemented.
+// (go-embedded-c patch). A packed bit-field is laid out by bitfield.go; a
+// packed enum is refused until implemented.
 
 // checkPacked records the packed attribute n in attr.
 func (c *ctx) checkPacked(n *AttributeValue, attr *Attributes) {
@@ -60,9 +60,11 @@ func (c *ctx) packMember(l []*AttributeValue, f *Field) {
 	c.packField(l[0], f)
 }
 
+// packField packs f. A packed bit-field is laid out by layoutStruct, on the
+// targets that follow the Itanium rule; elsewhere it is refused.
 func (c *ctx) packField(n *AttributeValue, f *Field) {
-	if f.IsBitfield() {
-		c.errors.add(errorf("%v: attribute packed on a bit-field is not supported", n.Position()))
+	if f.IsBitfield() && !c.itaniumLayout() {
+		c.errors.add(errorf("%v: attribute packed on a bit-field is not supported for this target", n.Position()))
 		return
 	}
 

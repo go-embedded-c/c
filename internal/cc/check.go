@@ -3448,7 +3448,11 @@ func (n *StructDeclarationList) check(c *ctx, s *StructOrUnionSpecifier, isVolat
 			break
 		}
 
-		n.checkStruct(c, a, fields)
+		if c.itaniumLayout() && hasBitfield(fields) {
+			c.layoutStruct(a, fields)
+		} else {
+			n.checkStruct(c, a, fields)
+		}
 		x.align = mathutil.Max(a.align, x.defAlign)
 		x.fields = fields
 		x.size = roundup(a.brkBytes, int64(x.align))
@@ -3460,7 +3464,11 @@ func (n *StructDeclarationList) check(c *ctx, s *StructOrUnionSpecifier, isVolat
 			break
 		}
 
-		n.checkUnion(c, a, fields)
+		if c.itaniumLayout() && hasBitfield(fields) {
+			c.layoutUnion(a, fields)
+		} else {
+			n.checkUnion(c, a, fields)
+		}
 		x.align = mathutil.Max(a.align, x.defAlign)
 		x.fields = fields
 		x.size = roundup(a.brkBytes, int64(x.align))

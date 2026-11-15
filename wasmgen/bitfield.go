@@ -13,8 +13,10 @@ import (
 // when the declared type is signed (a plain int bit-field is signed, as in
 // clang); a write loads the unit, clears the field's bits, ors the new ones
 // in and stores the unit back, which leaves the neighbours as they were.
-// The layout itself is cc/v4's; the gcc torture census compares it with
-// clang's.
+// The layout is cc/v4's, patched to the Itanium rule clang follows
+// (internal/cc/bitfield.go, go-embedded-c/c#29); a packed bit-field's unit
+// starts at its first byte and may be misaligned, which a wasm access
+// allows.
 
 // bitunit is a bit-field's storage unit and place in it.
 type bitunit struct {
