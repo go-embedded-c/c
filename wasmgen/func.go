@@ -216,7 +216,7 @@ func (m *module) function(fd *cc.FunctionDefinition) error {
 		entry.code = append(p.code, entry.code...)
 		entry.relocs = append(p.relocs, entry.relocs...)
 	}
-	body, calls, err := g.structure(d)
+	body, calls, err := g.structure(d, nil)
 	if err != nil {
 		return err
 	}

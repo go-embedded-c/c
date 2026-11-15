@@ -170,6 +170,8 @@ func (g *fgen) rvalue(e cc.ExpressionNode) (scalar, error) {
 			return s, nil
 		case cc.PrimaryExpressionIdent:
 			return s, g.load(x)
+		case cc.PrimaryExpressionStmt:
+			return s, g.stmtExpr(x, &s)
 		case cc.PrimaryExpressionFloat:
 			v, ok := floatLiteral(x)
 			if !ok || !s.isFloat {
@@ -534,6 +536,9 @@ func (g *fgen) effect(e cc.ExpressionNode) error {
 		return err
 	}
 	defer func() { g.depth-- }()
+	if x, ok := isStmtExpr(e); ok {
+		return g.stmtExpr(x, nil)
+	}
 	switch x := e.(type) {
 	case *cc.ExpressionList:
 		for l := x; l != nil; l = l.ExpressionList {
