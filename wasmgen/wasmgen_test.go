@@ -144,6 +144,8 @@ func TestCompileSeeds(t *testing.T) {
 
 var compileSeeds = []string{
 	"int main(void) { return 0; }",
+	// Complex numbers.
+	"double _Complex f(double _Complex a, float _Complex b) { a *= b; return a / 2.0 + ~b - 1.0i; } int main(void) { double _Complex z = f(1.0 + 2.0i, 3.0f); return (int)__real__ z + (z != 0) + !z; }",
 	// Irreducible loops (dispatch blocks) and labels as values.
 	"int f(int x) { int i = 0, a = 0; if (x) goto in; while (i < 10) { i += 2; in: i++; if (i & 4) goto B; } A: a++; if (a < 3) goto B; return i + a; B: a += 2; goto A; } int main(void) { return f(1); }",
 	"int f(int k) { static void *t[] = { &&a, &&b }; int r = 0; goto *t[k & 1]; a: r++; if (r < 5) goto *t[r & 1]; return r; b: r += 2; goto a; } int main(void) { return f(1) + ({ int q = 2; q * 3; }); }",
@@ -389,6 +391,7 @@ func TestAgainstClang(t *testing.T) {
 		stmtExprProgram,
 		labelProgram,
 		irreducibleProgram,
+		complexProgram,
 		// __func__ (C11 6.4.2.2): each function's own, printed, indexed, its
 		// size, its address stable across calls
 		"#include <stdio.h>\nstatic const char *who(void) { return __func__; }\nint main(void) { printf(\"%s %s %c %zu %d\\n\", __func__, who(), __func__[1], sizeof __func__, who() == who()); return 0; }",
@@ -694,6 +697,64 @@ int main(void) {
 	printf("%d %d\n", pingpong(5), pingpong(8));
 	printf("\n%d %d\n", nested(0), nested(1));
 	printf("%d %d %d\n", sw(0), sw(1), sw(2));
+	return 0;
+}
+`
+
+// complexProgram: float and double _Complex. Arithmetic of two complex
+// values and with a real operand, the product and quotient through
+// compiler-rt with an infinity and a NaN (Annex G's recovery), parameters
+// and results, a struct member, conversions both ways, __real__, __imag__,
+// ~ (conjugate), == and !=, truth values, op=, static and local
+// initialisers. Every part is printed with %a, so every bit shows.
+const complexProgram = `#include <stdio.h>
+typedef double _Complex dc;
+typedef float _Complex fc;
+static void show(const char *n, dc z) { printf("%s %a %a\n", n, __real__ z, __imag__ z); }
+static dc add(dc a, dc b) { return a + b; }
+static dc mul(dc a, dc b) { return a * b; }
+static dc dv(dc a, dc b) { return a / b; }
+static fc mulf(fc a, fc b) { return a * b; }
+static dc fromreal(double d) { return d; }
+struct s { int k; dc z; float f; };
+static dc g1 = 1.5 + 2.0i;
+static fc g2 = 3.0f;
+int main(void) {
+	dc a = 1.0 + 2.0i, b = 3.0 - 0.5i, inf = __builtin_inf() + 1.0i, nan = __builtin_nan("") + 0.0i;
+	fc f = 2.0f + 1.0fi;
+	double d = -2.0, n0 = -0.0;
+	struct s st = { 7, 0, 1.5f };
+	show("add", add(a, b));
+	show("sub", a - b);
+	show("mul", mul(a, b));
+	show("div", dv(a, b));
+	show("muli", mul(inf, a));
+	show("divz", dv(a, 0.0));
+	show("muln", mul(nan, a));
+	show("real+", d + a);
+	show("real-", d - a);
+	show("-real", a - d);
+	show("realx", d * a);
+	show("realdiv", a / d);
+	show("divreal", d / a);
+	show("negz", n0 + (0.0 - 0.0i));
+	show("neg", -a);
+	show("conj", ~a);
+	show("conv", fromreal(4.25));
+	show("float", mulf(f, f));
+	show("g", g1 + g2);
+	st.z = a * 2.0;
+	st.z += b;
+	st.z *= a;
+	st.z /= b;
+	st.z -= 1.0;
+	show("st", st.z);
+	printf("%d %d %d %d %d %d\n", a == a, a != b, a == 1.0 + 2.0i, (dc)1.0 == 1.0, !(0.0 + 0.0i), a == 1.0 + 3.0i);
+	if (b) printf("true\n");
+	if (0.0i) printf("false\n");
+	if (d * 0.0 + 2.0i) printf("imaginary\n");
+	d = a;
+	printf("%a %a %a %d %a\n", d, (double)b, __real__ f, st.k, (double)st.f);
 	return 0;
 }
 `

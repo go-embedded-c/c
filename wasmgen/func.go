@@ -322,6 +322,9 @@ func (g *fgen) condition(e cc.ExpressionNode) error {
 	if isLD(e.Type()) {
 		return g.ldCondition(e)
 	}
+	if isCx(e.Type()) {
+		return g.cxTruth(e)
+	}
 	from, err := g.rvalue(e)
 	if err != nil {
 		return err
@@ -375,14 +378,14 @@ func (g *fgen) jumpStatement(j *cc.JumpStatement) error {
 			g.dead()
 			return nil
 		}
-		if e := j.ExpressionList; e != nil && isAggregate(g.sig.rtype) && isAggregate(e.Type()) {
+		if e := j.ExpressionList; e != nil && isAggregate(g.sig.rtype) && (isAggregate(e.Type()) || isCx(g.sig.rtype)) {
 			// A structure or union result (BasicCABI.md): copied to the
 			// caller's memory, whose address is parameter 0, or loaded as
 			// a singleton's scalar.
 			switch {
 			case g.sig.sret != nil:
 				g.op(opLocalGet, 0)
-				if err := g.aggAddr(e); err != nil {
+				if err := g.aggAddrAs(e, g.sig.rtype); err != nil {
 					return err
 				}
 				g.constant(g.sig.sret.Size(), intScalar)

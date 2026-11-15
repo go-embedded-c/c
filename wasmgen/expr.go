@@ -124,6 +124,10 @@ func (g *fgen) rvalue(e cc.ExpressionNode) (scalar, error) {
 	}
 	defer func() { g.depth-- }()
 	t := e.Type()
+	if isCx(t) {
+		// A complex value in a scalar context: its real part (cx.go).
+		return g.cxReal(e)
+	}
 	if a, ok := t.(*cc.ArrayType); ok {
 		// An array is converted to a pointer to its first element.
 		ps, _ := scalarOf(a.Decay())
@@ -419,6 +423,13 @@ func (g *fgen) compare(a, b cc.ExpressionNode, signed, unsigned byte) error {
 		g.op(unsigned)
 		return nil
 	}
+	if isCx(a.Type()) || isCx(b.Type()) {
+		// Complex numbers have equality only (C11 6.5.9).
+		if signed != opI32Eq && signed != opI32Ne {
+			return unsupported(a, "ordering of complex numbers")
+		}
+		return g.cxEqual(a, b, signed == opI32Eq)
+	}
 	if (isLD(a.Type()) || isLD(b.Type())) && !isAggregate(a.Type()) && !isAggregate(b.Type()) {
 		// Both operands are arithmetic: the comparison is in long double.
 		_, oka := scalarOf(a.Type())
@@ -498,7 +509,16 @@ func (g *fgen) unary(x *cc.UnaryExpression, s scalar) error {
 		g.op(opFor(opI32Xor, s))
 		g.normalize(s)
 		return nil
+	case cc.UnaryExpressionReal, cc.UnaryExpressionImag:
+		return g.cxPart(x.UnaryExpression, x.Case == cc.UnaryExpressionImag, s)
 	case cc.UnaryExpressionNot:
+		if isCx(x.CastExpression.Type()) {
+			if err := g.cxTruth(x.CastExpression); err != nil {
+				return err
+			}
+			g.op(opI32Eqz)
+			return nil
+		}
 		if isLD(x.CastExpression.Type()) {
 			// !x is x == 0: false for NaN.
 			if err := g.ldCondition(x.CastExpression); err != nil {
@@ -823,6 +843,18 @@ var binaryOps = map[cc.AssignmentExpressionCase][2]byte{ // signed, unsigned
 // E1's address and value, which a call in E2 can observe (gcc torture
 // pr58943.c: x[0] |= foo(), where foo changes x[0]).
 func (g *fgen) assign(x *cc.AssignmentExpression, want bool) error {
+	if isCx(x.UnaryExpression.Type()) {
+		// Only effect gets here with a complex E1 (aggAddr takes the value).
+		if err := g.aggAddr(x); err != nil {
+			return err
+		}
+		g.op(opDrop)
+		return nil
+	}
+	if isCx(x.AssignmentExpression.Type()) && (x.Case == cc.AssignmentExpressionMul || x.Case == cc.AssignmentExpressionDiv) {
+		// The real part of E1 op E2 is not E1 op the real part of E2.
+		return unsupported(x, "scalar *= or /= of a complex value")
+	}
 	if isAggregate(x.UnaryExpression.Type()) {
 		// Only effect gets here with a structure: rvalue refuses its type,
 		// aggAddr takes the value, and cc/v4 refuses op= on structures.
@@ -1064,7 +1096,7 @@ func (g *fgen) emitCall(x *cc.PostfixExpression, f *sig, args, extra []cc.Expres
 			// A copy the callee may change (BasicCABI.md).
 			tmp := g.frameSlot(p.t.Size(), p.t.Align())
 			g.slotAddress(tmp)
-			if err := g.aggAddr(a); err != nil {
+			if err := g.aggAddrAs(a, p.t); err != nil {
 				return err
 			}
 			g.constant(p.t.Size(), intScalar)

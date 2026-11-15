@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals and `__func__`, `main(argc, argv)`, `float`, `double` and `long double` (binary128), bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), `asm` statements with an empty template, the `mode` and `packed` attributes, clang's bit-field layout and promotion, statement expressions, labels as values, and irreducible loops. 1599 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals and `__func__`, `main(argc, argv)`, `float`, `double` and `long double` (binary128), `float` and `double _Complex`, bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), `asm` statements with an empty template, the `mode` and `packed` attributes, clang's bit-field layout and promotion, statement expressions, labels as values, and irreducible loops. 1605 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -445,6 +445,32 @@ calls compiler-rt's soft-float routines, as clang 23.1.4 emits them
   scalar, and `__builtin_isinfl` and `__builtin_isnanl`, which clang does
   not know either.
 
+`float _Complex` and `double _Complex` (C11 Annex G):
+
+- BasicCABI.md represents a complex value as a struct of its two parts, real
+  then imaginary. So it is an aggregate here: passed through a pointer,
+  returned through `sret`, copied, stored and laid out like a struct of two
+  members.
+- An expression of complex type evaluates to the address of its two parts:
+  the object of an lvalue, or a frame temporary.
+- What clang emits (probed with `-S`):
+  - `+` and `-` work part by part. With a real operand, clang does not
+    convert it to complex but keeps the other operand's imaginary part as
+    it is, so `-0.0` stays `-0.0`. It folds constants the same way, and so
+    does this generator.
+  - `*` of two complex values is `__mulsc3`/`__muldc3`, which applies Annex
+    G's recovery of infinities. With a real operand, `*` works part by part.
+  - `/` is `__divsc3`/`__divdc3`, a real dividend included; a real divisor
+    divides each part.
+  - `-z` negates both parts, and `~z` (GNU conjugate) the imaginary part.
+  - `==` and `!=` compare both parts.
+  - In a scalar context, a complex value is its real part. As a truth value
+    it is true when either part is non-zero.
+- `__real__`, `__imag__`, compound assignment, static and local initialisers
+  work.
+- Refused: `long double _Complex`, and `*=` or `/=` of a scalar by a complex
+  value, whose real part is not the scalar times the real part.
+
 W7 adds `goto`:
 
 - A label is a block of the graph and a `goto` is an edge to it. The
@@ -495,8 +521,9 @@ does for structures, is the fifth):
   misaligning a `long long` in the varargs buffer, on the side that is
   ours.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-15, with `__func__`, 1599 files ran the same as under clang, 4
-  gained and none lost (1595 with irreducible loops, 4 gained and none
+  2026-11-15, with `float` and `double _Complex`, 1605 files ran the same
+  as under clang, 6 gained and none lost (1599 with `__func__`, 4 gained
+  and none lost, 1595 with irreducible loops, 4 gained and none
   lost, 1591 with labels as values, 9 gained and
   none lost, 1582 with statement expressions, 5 gained
   and none lost, 1577 with `long long` bit-fields as narrow
