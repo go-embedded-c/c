@@ -3,6 +3,7 @@ package wasmgen
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/go-embedded-c/c/internal/cc"
@@ -95,6 +96,29 @@ func (m *module) staticValue(e cc.ExpressionNode, t cc.Type, seg *wasm.Segment, 
 		// The 16 bytes of the binary128 value, computed exactly (quad.go).
 		if !ldStatic(e, seg.Init[off:]) {
 			return unsupported(e, "non-constant initializer")
+		}
+		return nil
+	}
+	if isCx(t) {
+		// The two parts of a constant, real then imaginary (cx.go); a real
+		// constant has an imaginary part of +0.
+		v, ok := cxConst(e)
+		if !ok {
+			f, okf := floatConst(e)
+			if !okf {
+				return unsupported(e, "non-constant initializer")
+			}
+			v = complex(f, 0)
+		}
+		el := cxElem(t)
+		for i, part := range []float64{real(v), imag(v)} {
+			var b []byte
+			if el.vt == wasm.F32 {
+				b = binary.LittleEndian.AppendUint32(nil, math.Float32bits(float32(part)))
+			} else {
+				b = binary.LittleEndian.AppendUint64(nil, math.Float64bits(part))
+			}
+			copy(seg.Init[off+int64(i*len(b)):], b)
 		}
 		return nil
 	}
@@ -617,6 +641,11 @@ func (g *fgen) aggAddr(e cc.ExpressionNode) error {
 		return err
 	}
 	defer func() { g.depth-- }()
+	if isCx(e.Type()) {
+		if done, err := g.cxComputed(e); done {
+			return err
+		}
+	}
 	e = strip(e)
 	switch x := e.(type) {
 	case *cc.PostfixExpression:
@@ -677,7 +706,7 @@ func (g *fgen) aggAssign(x *cc.AssignmentExpression, want bool) error {
 	if t.IsIncomplete() {
 		return unsupported(x, "assignment of an incomplete type")
 	}
-	if err := g.aggAddr(x.AssignmentExpression); err != nil {
+	if err := g.aggAddrAs(x.AssignmentExpression, t); err != nil {
 		return err
 	}
 	src := g.local(wasm.I32)
@@ -894,7 +923,7 @@ func (g *fgen) localInit(in *cc.Initializer, slot int64) error {
 		if isAggregate(t) {
 			// struct S b = a: a copy of the value's bytes.
 			g.slotAddress(at)
-			if err := g.aggAddr(e); err != nil {
+			if err := g.aggAddrAs(e, t); err != nil {
 				return err
 			}
 			g.constant(t.Size(), intScalar)
