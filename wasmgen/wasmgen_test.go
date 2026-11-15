@@ -57,6 +57,12 @@ func TestUnsupported(t *testing.T) {
 		{"int f(int n, void *p) { struct S { int i[n]; int k; } *s = p; return s->k; } int main(void) { return 0; }", "local of type pointer to struct S"},
 		{"int g(int n) { __builtin_va_start(n, n); return 0; } int main(void) { return g(1); }", "va_start outside a variadic function"},
 		{"int x; struct S { int a: 3; } s = {x}; int main(void) { return 0; }", "non-constant bit-field initializer"},
+		// Statement expressions: jumping out of one is permitted by GCC and
+		// refused here; jumping into one is not permitted.
+		{"int main(void) { int i, s = 0; for (i = 0; i < 3; i++) s += ({ if (i == 1) break; i; }); return s; }", "jump out of a statement expression"},
+		{"int main(void) { int i, s = 0; for (i = 0; i < 3; i++) s += ({ if (i == 1) continue; i; }); return s; }", "jump out of a statement expression"},
+		{"int main(int c, char **v) { switch (c) { case 1: ({ case 2: c = 5; }); } return c; }", "jump out of a statement expression"},
+		{"int main(void) { int x = ({ int y = 1; goto l; l: y++; y; }); return x; }", "label or goto in a statement expression"},
 		// A packed bit-field of 64 bits from bit 3 spans 9 bytes, more than
 		// any wasm access.
 		{"struct __attribute__((packed)) S { char c:3; unsigned long long x:64; }; int main(void) { struct S s; s.x = 1; return (int)s.x; }", "bit-field in a storage unit of odd size"},
@@ -352,6 +358,7 @@ func TestAgainstClang(t *testing.T) {
 		packedProgram,
 		bitfieldLayoutProgram,
 		bitfieldTypeProgram,
+		stmtExprProgram,
 		// long double (binary128): storage, parameters, results, every
 		// operation, comparison and conversion, varargs
 		quadProgram,
@@ -521,6 +528,43 @@ int main(void) {
 	v.a += 0x7fffff; v.c = v.c * 3; v.e -= 1; v.i = v.a;
 	printf("%d %d %lld %d\n", v.a, v.c, v.e, v.i);
 	return 0;
+}
+`
+
+// stmtExprProgram: GNU statement expressions in every position an
+// expression takes, with control flow inside them: an operand above values
+// already on the stack, a short-circuited one, conditional arms, call
+// arguments, an array index, a loop condition; loops, a switch, breaks and
+// a return inside; nesting; a void one; the value converted to the
+// construct's type. Calls print, so the order of evaluation shows.
+const stmtExprProgram = `#include <stdio.h>
+static int t(int v) { printf("<%d>", v); return v; }
+static int f(int n) {
+	int s = ({ int i, a = 0; for (i = 0; i < n; i++) { if (i == 3) continue; a += i; } a; });
+	int w = 0;
+	while (({ int k = w * w; k < 50; })) w++;
+	return s * 100 + w;
+}
+static int early(int x) {
+	int r = ({ if (x < 0) return -1; x * 2; });
+	return r + 1;
+}
+int main(void) {
+	int a[5] = { 10, 20, 30, 40, 50 }, i = 2, z = 0;
+	long long big = 1LL << 40;
+	char c;
+	printf("%d %d %d\n", f(6), early(-3), early(4));
+	printf("%d\n", t(1) + ({ int j, s = 0; for (j = 0; j < 4; j++) s += t(j); s; }) * t(2));
+	printf("%d %d\n", z && ({ t(99); 1; }), z || ({ t(7); 0; }));
+	printf("%d\n", i > 1 ? ({ int q = t(5); q * q; }) : ({ t(6); 0; }));
+	printf("%d\n", a[({ int k = i; switch (k) { case 2: k = 4; break; default: k = 0; } k; })]);
+	printf("%lld\n", ({ long long u = big; u + ({ int v = 3; v * v; }); }));
+	c = ({ 300 + 1; });
+	printf("%d\n", c);
+	({ t(42); });
+	({ for (i = 0; i < 3; i++) t(i); });
+	printf("\n%d %d\n", ({ int x = 0; do { x += 7; } while (x < 30); x; }), i);
+	return ({ int r = 0; r; });
 }
 `
 

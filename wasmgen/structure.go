@@ -59,11 +59,21 @@ type structurer struct {
 }
 
 // structure numbers the reachable blocks, builds the dominator tree and
-// emits the structured body.
-func (g *fgen) structure(n cc.Node) (out, []callSite, error) {
+// emits the structured body. With exit nil the blocks are a function body,
+// every path of which returns. Otherwise they are a region (a statement
+// expression, stmtexpr.go) whose paths end in a jump to exit, a block
+// outside the graph: the region is wrapped in a wasm block labelled by exit,
+// and such a jump is a br out of it, so that nothing the structurer places
+// after the last node runs by falling through. (Without goto, which a
+// statement expression may not hold here, no body has been found where the
+// structurer places anything after its end; the br does not rely on that.)
+func (g *fgen) structure(n cc.Node, exit *block) (out, []callSite, error) {
 	entry := g.blocks[0]
 	for _, b := range g.blocks {
 		b.rpo = -1
+	}
+	if exit != nil {
+		exit.rpo = -1
 	}
 	// Postorder by an explicit DFS: a hostile function cannot exhaust the
 	// goroutine stack through recursion here.
@@ -79,7 +89,7 @@ func (g *fgen) structure(n cc.Node) (out, []callSite, error) {
 		if top.next < len(top.b.succ) {
 			s := top.b.succ[top.next]
 			top.next++
-			if !visited[s] {
+			if s != exit && !visited[s] {
 				visited[s] = true
 				stack = append(stack, item{b: s})
 			}
@@ -95,7 +105,9 @@ func (g *fgen) structure(n cc.Node) (out, []callSite, error) {
 	}
 	for _, b := range order {
 		for _, s := range b.succ {
-			s.preds = append(s.preds, b)
+			if s != exit {
+				s.preds = append(s.preds, b)
+			}
 		}
 	}
 
@@ -162,6 +174,15 @@ func (g *fgen) structure(n cc.Node) (out, []callSite, error) {
 			s.loop[b] = true
 		}
 		s.merge[b] = forward >= 2
+	}
+	if exit != nil {
+		s.emit(opBlock, voidBT)
+		s.doTree(entry, []frame{{frameBlock, exit}})
+		s.emit(opEnd)
+		if s.err != nil {
+			return out{}, nil, s.err
+		}
+		return s.out, s.out.calls, nil
 	}
 	s.doTree(entry, nil)
 	if s.err != nil {
