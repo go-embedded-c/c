@@ -113,10 +113,15 @@ func (m *module) staticValue(e cc.ExpressionNode, t cc.Type, seg *wasm.Segment, 
 		el := cxElem(t)
 		for i, part := range []float64{real(v), imag(v)} {
 			var b []byte
-			if el.vt == wasm.F32 {
+			switch {
+			case el.vt == wasm.F32:
 				b = binary.LittleEndian.AppendUint32(nil, math.Float32bits(float32(part)))
-			} else {
+			case el.vt == wasm.F64:
 				b = binary.LittleEndian.AppendUint64(nil, math.Float64bits(part))
+			case el.vt == wasm.I64:
+				b = binary.LittleEndian.AppendUint64(nil, uint64(int64(part)))
+			default:
+				b = binary.LittleEndian.AppendUint32(nil, uint32(int32(part)))
 			}
 			copy(seg.Init[off+int64(i*len(b)):], b)
 		}
@@ -505,6 +510,10 @@ func (g *fgen) addr(e cc.ExpressionNode) error {
 				return g.vaArg(x, ap, t)
 			}
 			return g.ptrValue(x.CastExpression)
+		}
+		if (x.Case == cc.UnaryExpressionReal || x.Case == cc.UnaryExpressionImag) && isCx(x.UnaryExpression.Type()) {
+			// __real__ z and __imag__ z designate the parts of z (GNU).
+			return g.cxPartAddr(x.UnaryExpression, x.Case == cc.UnaryExpressionImag)
 		}
 	case *cc.PostfixExpression:
 		switch x.Case {

@@ -29,21 +29,83 @@ import (
 //   - a complex value in a scalar context is its real part (C11 6.3.1.7p2),
 //     and as a truth value it is true when either part is non-zero.
 
-// isCx reports whether t is a complex type the generator compiles.
+// isCx reports whether t is a complex type the generator compiles: float
+// and double _Complex, and GNU's integer complex types of int, unsigned,
+// long and long long parts. long double _Complex and the char and short
+// integer ones are refused.
 func isCx(t cc.Type) bool {
 	if t == nil {
 		return false
 	}
-	k := t.Kind()
-	return k == cc.ComplexFloat || k == cc.ComplexDouble
+	switch t.Kind() {
+	case cc.ComplexFloat, cc.ComplexDouble, cc.ComplexInt, cc.ComplexUInt, cc.ComplexLong, cc.ComplexLongLong:
+		return true
+	}
+	return false
 }
 
 // cxElem is the representation of each part of the complex type t.
 func cxElem(t cc.Type) scalar {
-	if t.Kind() == cc.ComplexFloat {
+	switch t.Kind() {
+	case cc.ComplexFloat:
 		return scalar{vt: wasm.F32, bits: 32, signed: true, isFloat: true}
+	case cc.ComplexDouble:
+		return scalar{vt: wasm.F64, bits: 64, signed: true, isFloat: true}
 	}
-	return scalar{vt: wasm.F64, bits: 64, signed: true, isFloat: true}
+	bits := int(t.Size()) * 4 // half the size, in bits
+	s := scalar{vt: wasm.I32, bits: bits, signed: t.Kind() != cc.ComplexUInt}
+	if bits == 64 {
+		s.vt = wasm.I64
+	}
+	return s
+}
+
+// cxConstPart pushes v as a part of representation el.
+func (g *fgen) cxConstPart(v float64, el scalar) {
+	if el.isFloat {
+		g.constF(v, el)
+		return
+	}
+	g.constant(int64(v), el)
+}
+
+// cxNeg negates the part in local l.
+func (g *fgen) cxNeg(l uint32, el scalar) {
+	if el.isFloat {
+		g.getLocal(l)
+		g.op(pick(el.vt == wasm.F32, opF32Neg, opF64Neg))
+	} else {
+		g.zero(el)
+		g.getLocal(l)
+		g.op(opFor(opI32Sub, el))
+	}
+	g.setLocal(l)
+}
+
+// cxRel pushes the comparison op (opI32Eq or opI32Ne) of the two parts on
+// the stack.
+func (g *fgen) cxRel(op byte, el scalar) {
+	switch {
+	case el.isFloat:
+		g.op(floatRel(op, el))
+	case el.vt == wasm.I64:
+		g.op(op + i64CompareDelta)
+	default:
+		g.op(op)
+	}
+}
+
+// cxPartAddr pushes the address of __real__ e or __imag__ e of the complex
+// lvalue e.
+func (g *fgen) cxPartAddr(e cc.ExpressionNode, imag bool) error {
+	if err := g.aggAddr(e); err != nil {
+		return err
+	}
+	if imag {
+		g.constant(int64(cxElem(e.Type()).bits/8), intScalar)
+		g.op(opI32Add)
+	}
+	return nil
 }
 
 // cxParts holds the two parts of a value in locals.
@@ -63,7 +125,7 @@ func (g *fgen) parts(e cc.ExpressionNode, el scalar) (p cxParts, real bool, err 
 			return p, true, err
 		}
 		g.setLocal(p.re)
-		g.constF(0, el)
+		g.zero(el)
 		g.setLocal(p.im)
 		return p, true, nil
 	}
@@ -119,9 +181,9 @@ func (g *fgen) cxComputed(e cc.ExpressionNode) (bool, error) {
 	if v, ok := cxConst(e); ok {
 		el := cxElem(t)
 		re, im := g.local(el.vt), g.local(el.vt)
-		g.constF(real(v), el)
+		g.cxConstPart(real(v), el)
 		g.setLocal(re)
-		g.constF(imag(v), el)
+		g.cxConstPart(imag(v), el)
 		g.setLocal(im)
 		g.cxStore(t, re, im)
 		return true, nil
@@ -148,16 +210,11 @@ func (g *fgen) cxComputed(e cc.ExpressionNode) (bool, error) {
 			if err != nil {
 				return true, err
 			}
-			neg := pick(p.el.vt == wasm.F32, opF32Neg, opF64Neg)
 			if x.Case == cc.UnaryExpressionMinus {
-				g.getLocal(p.re)
-				g.op(neg)
-				g.setLocal(p.re)
+				g.cxNeg(p.re, p.el)
 			}
 			if x.Case != cc.UnaryExpressionPlus {
-				g.getLocal(p.im)
-				g.op(neg)
-				g.setLocal(p.im)
+				g.cxNeg(p.im, p.el)
 			}
 			g.cxStore(t, p.re, p.im)
 			return true, nil
@@ -307,6 +364,9 @@ func (g *fgen) cxCombine(t cc.Type, p cxParts, aReal bool, q cxParts, bReal bool
 	part := func(x, y uint32, o byte) {
 		g.getLocal(x)
 		g.getLocal(y)
+		if o == opI32DivS && !el.isFloat && !el.signed {
+			o = opI32DivU
+		}
 		g.op(opFor(o, el))
 	}
 	switch {
@@ -320,13 +380,17 @@ func (g *fgen) cxCombine(t cc.Type, p cxParts, aReal bool, q cxParts, bReal bool
 			g.getLocal(q.im)
 		case aReal:
 			g.getLocal(q.im)
-			g.op(pick(el.vt == wasm.F32, opF32Neg, opF64Neg))
+			g.setLocal(im)
+			g.cxNeg(im, el)
+			g.getLocal(im)
 		default:
 			part(p.im, q.im, op)
 		}
 		g.setLocal(im)
-	case op == opI32Mul && (aReal || bReal), op == opI32DivS && bReal:
-		// A real operand scales each part of the other.
+	case el.isFloat && (op == opI32Mul && (aReal || bReal) || op == opI32DivS && bReal):
+		// A real operand scales each part of the other. Not for integer
+		// parts: clang divides an integer complex by a real operand made
+		// complex, which overflows differently (measured: (4e9 + 10i) / 3u).
 		x, y, k := p.re, p.im, q.re
 		if aReal {
 			x, y, k = q.re, q.im, p.re
@@ -340,6 +404,38 @@ func (g *fgen) cxCombine(t cc.Type, p cxParts, aReal bool, q cxParts, bReal bool
 			g.setLocal(re)
 			part(y, k, op)
 		}
+		g.setLocal(im)
+	case !el.isFloat:
+		// GNU integer complex: the textbook product, and the quotient
+		// ((ac + bd) / (cc + dd), (bc - ad) / (cc + dd)) as clang
+		// computes it (CGExprComplex, EmitBinDiv for integers).
+		if op == opI32Mul {
+			part(p.re, q.re, opI32Mul)
+			part(p.im, q.im, opI32Mul)
+			g.op(opFor(opI32Sub, el))
+			g.setLocal(re)
+			part(p.re, q.im, opI32Mul)
+			part(p.im, q.re, opI32Mul)
+			g.op(opFor(opI32Add, el))
+			g.setLocal(im)
+			break
+		}
+		den := g.local(el.vt)
+		part(q.re, q.re, opI32Mul)
+		part(q.im, q.im, opI32Mul)
+		g.op(opFor(opI32Add, el))
+		g.setLocal(den)
+		part(p.re, q.re, opI32Mul)
+		part(p.im, q.im, opI32Mul)
+		g.op(opFor(opI32Add, el))
+		g.setLocal(re)
+		part(re, den, opI32DivS)
+		g.setLocal(re)
+		part(p.im, q.re, opI32Mul)
+		part(p.re, q.im, opI32Mul)
+		g.op(opFor(opI32Sub, el))
+		g.setLocal(im)
+		part(im, den, opI32DivS)
 		g.setLocal(im)
 	default:
 		name := map[bool]string{true: "__mul", false: "__div"}[op == opI32Mul]
@@ -410,7 +506,7 @@ func (g *fgen) cxPart(e cc.ExpressionNode, imag bool, s scalar) error {
 			if err := g.effect(e); err != nil {
 				return err
 			}
-			g.constF(0, s)
+			g.zero(s)
 			return nil
 		}
 		return g.operand(e, s)
@@ -438,8 +534,8 @@ func (g *fgen) cxTruth(e cc.ExpressionNode) error {
 	}
 	for _, l := range []uint32{p.re, p.im} {
 		g.getLocal(l)
-		g.constF(0, p.el)
-		g.op(floatRel(opI32Ne, p.el))
+		g.zero(p.el)
+		g.cxRel(opI32Ne, p.el)
 	}
 	g.op(opI32Or)
 	return nil
@@ -464,7 +560,7 @@ func (g *fgen) cxEqual(a, b cc.ExpressionNode, eq bool) error {
 	for _, pair := range [][2]uint32{{p.re, q.re}, {p.im, q.im}} {
 		g.getLocal(pair[0])
 		g.getLocal(pair[1])
-		g.op(floatRel(opI32Eq, el))
+		g.cxRel(opI32Eq, el)
 	}
 	g.op(opI32And)
 	if !eq {

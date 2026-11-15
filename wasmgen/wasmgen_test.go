@@ -392,6 +392,7 @@ func TestAgainstClang(t *testing.T) {
 		labelProgram,
 		irreducibleProgram,
 		complexProgram,
+		intComplexProgram,
 		// __func__ (C11 6.4.2.2): each function's own, printed, indexed, its
 		// size, its address stable across calls
 		"#include <stdio.h>\nstatic const char *who(void) { return __func__; }\nint main(void) { printf(\"%s %s %c %zu %d\\n\", __func__, who(), __func__[1], sizeof __func__, who() == who()); return 0; }",
@@ -755,6 +756,46 @@ int main(void) {
 	if (d * 0.0 + 2.0i) printf("imaginary\n");
 	d = a;
 	printf("%a %a %a %d %a\n", d, (double)b, __real__ f, st.k, (double)st.f);
+	return 0;
+}
+`
+
+// intComplexProgram: GNU integer complex types (int, unsigned, long long
+// parts) and __real__ / __imag__ as lvalues: arithmetic, the product and
+// the quotient (signed and unsigned), conjugate, parameters and results,
+// assignment to a part and its address, also of a double _Complex.
+const intComplexProgram = `#include <stdio.h>
+typedef __complex__ int ci;
+typedef __complex__ unsigned cu;
+typedef __complex__ long long cl;
+static ci conj(ci x) { return ~x; }
+static cl mul(cl a, cl b) { return a * b; }
+int main(void) {
+	ci a, b, c;
+	cu u;
+	cl l;
+	double _Complex d;
+	double *pd;
+	__real__ a = 7; __imag__ a = -3;
+	__real__ b = 2; __imag__ b = 5;
+	c = a * b;
+	printf("%d %d\n", __real__ c, __imag__ c);
+	c = a / b; printf("%d %d\n", __real__ c, __imag__ c);
+	c = (a * b) / b; printf("%d %d\n", __real__ c, __imag__ c);
+	c = a + b - 1; printf("%d %d\n", __real__ c, __imag__ c);
+	c = conj(a); printf("%d %d %d %d\n", __real__ c, __imag__ c, c == conj(a), c != a);
+	c = -a * 3; printf("%d %d\n", __real__ c, __imag__ c);
+	__real__ u = 4000000000u; __imag__ u = 10;
+	u = u / 3; printf("%u %u\n", __real__ u, __imag__ u);
+	__real__ l = 1LL << 40; __imag__ l = -2;
+	l = mul(l, l); printf("%lld %lld\n", __real__ l, __imag__ l);
+	d = 1.5 + 2.5i;
+	__imag__ d = -4.0;
+	pd = &__real__ d; *pd += 1.0;
+	__real__ d *= 2;
+	printf("%a %a %d\n", __real__ d, __imag__ d, (int)__real__ a);
+	c = 1.0 + 2.0i;
+	printf("%d %d %d\n", __real__ c, __imag__ c, !(a - a));
 	return 0;
 }
 `
