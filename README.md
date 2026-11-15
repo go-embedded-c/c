@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float`, `double` and `long double` (binary128), bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), and `asm` statements with an empty template. 1552 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float`, `double` and `long double` (binary128), bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), `asm` statements with an empty template, and the `mode` and `packed` attributes. 1555 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -306,11 +306,27 @@ Refused: a template that is not empty, a named operand, `asm goto`, and an
 untied `=` output that is not memory, whose value would be whatever the
 register held.
 
-The attribute `mode` (`unsigned int __attribute__((mode(QI)))`) is refused
-by the front end. cc/v4 ignored it, so the type kept its declared size
-(4 bytes where clang makes it 1). Hidden until now behind the `asm`
-refusal, it made `memclr.c` and `misalign.c` write past packed members.
-Six files that used it agreed with clang by chance and are refused with it.
+cc/v4 ignored two GNU attributes that change the layout of data, and the
+front end (patches in `internal/cmd/vendorcc`) now implements them:
+
+- `mode` (`unsigned int __attribute__((mode(QI)))`) gives the declaration
+  the type of the mode's width: `QI`, `HI`, `SI`, `DI`, `byte`, `word`,
+  `pointer`, and `SF`/`DF` for floating types. An integer keeps the signedness
+  of the declared type, and an enumeration that of its underlying type, as in
+  clang. cc/v4 had left the type its declared size (4 bytes where clang makes
+  it 1).
+- `packed` on the definition of a struct or union packs each member. On a
+  member, it packs that member. A packed member has alignment 1 unless an
+  `aligned` attribute asks for more. cc/v4 had kept the unpacked layout
+  (`sizeof` 24 where clang gives 11).
+
+Both are refused where nothing applies them: in a type name, before a member,
+on an `enum`. They are also refused on what is not implemented yet: a packed
+bit-field, `TI`, and a mode on a vector type (go-embedded-c/c#42).
+
+The same patches fix a parser defect that dropped the middle values of an
+attribute list of three or more, and panicked on a `,` after a refused first
+value.
 
 Function pointers:
 
@@ -432,9 +448,10 @@ does for structures, is the fifth):
   misaligning a `long long` in the varargs buffer, on the side that is
   ours.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-14, with the empty-template `asm` statements, 1552 files ran the
-  same as under clang: 56 gained, and 6 lost to the refusal of the `mode`
-  attribute, which only agreed with clang by chance (1502 with
+  2026-11-15, with the `mode` and `packed` attributes, 1555 files ran the
+  same as under clang. Eight were gained, and five were lost to the refusal
+  of packed bit-fields: those five had agreed with clang only by chance
+  (1552 with the empty-template `asm` statements, 1502 with
   `long double`, 1477 with static member addresses and the floating-point builtins in
   static initializers, 1472 with the floating-point and byte builtins, 1440 with the computing builtins,
   1404 with function pointers, 1381 after W7, 1350 with compound literals,

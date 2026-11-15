@@ -347,6 +347,8 @@ func TestAgainstClang(t *testing.T) {
 		builtinsProgram2,
 		staticInitProgram,
 		asmProgram,
+		modeProgram,
+		packedProgram,
 		// long double (binary128): storage, parameters, results, every
 		// operation, comparison and conversion, varargs
 		quadProgram,
@@ -426,6 +428,61 @@ int main(void) {
 
 // staticInitProgram: address constants of members (C11 6.6p9), and the
 // floating builtins in static initializers, printed as their bits.
+// modeProgram: __attribute__((mode)) gives each declaration the width of its
+// mode and keeps the declared signedness: wraparound at 8, 16 and 64 bits,
+// enumeration members of one byte, the alignment of members of each width,
+// pointer arithmetic over the narrowed type, a floating mode.
+const modeProgram = `#include <stdio.h>
+typedef unsigned int __attribute__((mode(QI))) u8;
+typedef signed int __attribute__((mode(QI))) s8;
+typedef unsigned int u16 __attribute__((mode(HI)));
+typedef int s16 __attribute__((__mode__(__HI__)));
+typedef unsigned int __attribute__((mode(DI))) u64;
+typedef int word __attribute__((mode(word)));
+typedef double __attribute__((mode(SF))) f32;
+enum E { A, B = 200 };
+enum N { M = -100, P = 100 };
+struct e { enum E __attribute__((mode(byte))) a, b; enum N __attribute__((mode(__byte__))) n; };
+struct pk { u8 x; u64 y; u16 z; };
+int main(void) {
+	u8 a = 250, arr[4] = { 1, 2, 3, 4 }, *p = arr; s8 b = 120; u16 c = 65535; s16 d = -32768; u64 e = 1;
+	struct e s = { A, B, M }; struct pk k = { 255, 0x0102030405060708ULL, 0xabcd }; f32 f = 1.0 / 3; word w = -1;
+	a += 10; b += 10; c++; d--; e <<= 63;
+	printf("%u %d %u %d %llu\n", a, b, c, d, (unsigned long long)e);
+	printf("%zu %zu %zu %zu %zu %zu\n", sizeof(u8), sizeof(u16), sizeof(u64), sizeof(struct e), sizeof(struct pk), sizeof(word));
+	s.b += 100; s.n -= 100;
+	printf("%d %d %d %d\n", s.a, s.b, s.n, s.n < 0);
+	p += 3; *p -= 5;
+	printf("%u %d %u\n", *p, (int)(p - arr), arr[3] > 200);
+	printf("%u %llx %x %a %d\n", k.x, (unsigned long long)k.y, k.z, (double)f, w < 0);
+	return 0;
+}
+`
+
+// packedProgram: packed structs and members at run time: the bytes of each
+// layout, misaligned loads and stores of every width, an array of packed
+// structs, a packed struct copied and passed by value, a union.
+const packedProgram = `#include <stdio.h>
+#include <string.h>
+struct __attribute__((packed)) p { char c; long long l; short s; int i; double d; };
+struct m { char c; int i __attribute__((packed)); short s __attribute__((aligned(2), packed)); };
+struct o { char c; struct p in; } __attribute__((packed));
+union __attribute__((packed)) u { char c[3]; short s; };
+static void dump(const void *v, size_t n) { const unsigned char *b = v; size_t i; for (i = 0; i < n; i++) printf("%02x", b[i]); printf("\n"); }
+static long long sum(struct p q) { return q.c + q.l + q.s + q.i + (long long)q.d; }
+int main(void) {
+	struct p a[3]; struct m m; struct o o; union u u; int k;
+	memset(a, 0xaa, sizeof a); memset(&m, 0xaa, sizeof m); memset(&o, 0xaa, sizeof o);
+	for (k = 0; k < 3; k++) { a[k].c = k; a[k].l = 0x0102030405060708LL * (k + 1); a[k].s = -2 - k; a[k].i = 70000 + k; a[k].d = 1.5 * k; }
+	m.c = 1; m.i = 0x11223344; m.s = 0x5566;
+	o.c = 9; o.in = a[1]; o.in.l += 1;
+	u.s = 0x7788;
+	dump(a, sizeof a); dump(&m, sizeof m); dump(&o, sizeof o); dump(&u, sizeof u);
+	printf("%zu %zu %zu %zu %lld %lld %d\n", sizeof(struct p), sizeof(struct m), sizeof(struct o), sizeof(union u), sum(a[2]), sum(o.in), a[2].s + m.s);
+	return 0;
+}
+`
+
 // asmProgram: asm statements with an empty template, the optimisation
 // barriers of the gcc torture tests: inputs evaluated, "+" outputs
 // unchanged, "=" outputs given their tied input.
