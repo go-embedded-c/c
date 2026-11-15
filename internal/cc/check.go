@@ -83,6 +83,9 @@ type ctx struct {
 
 	checkingSizeof bool
 	usesVectors    bool
+
+	modes  map[*AttributeValue]bool // go-embedded-c patch, see mode.go
+	packed map[*AttributeValue]bool // go-embedded-c patch, see packed.go
 }
 
 func newCtx(ast *AST, cfg *Config) *ctx {
@@ -756,6 +759,8 @@ func (n *AST) check(cfg *Config) (*ctx, error) {
 	for l := n.TranslationUnit; l != nil; l = l.TranslationUnit {
 		l.ExternalDeclaration.check(c)
 	}
+	c.unapplied(c.modes, "mode")
+	c.unapplied(c.packed, "packed")
 	c.fixSyntheticDeclarators(n.Scope)
 	c.checkScope(n.Scope)
 	n.SizeT = c.sizeT(n.EOF)
@@ -1279,6 +1284,7 @@ func (n *Declaration) check(c *ctx) {
 				if s := d.Type().Attributes().Visibility(); s != "" && d.Type().Attributes().VisibilityDecl() == nil {
 					d.Type().Attributes().setVisibilityDecl(d)
 				}
+				d.applyMode(c)
 			}
 			d.fixVolatileAndConst(c)
 			if dsa != nil && d.Pointer != nil && asa == nil {
@@ -1347,6 +1353,9 @@ func (n *InitDeclarator) check(c *ctx, t Type, isExtern, isStatic, isAtomic, isT
 		var err error
 		if n.Declarator.typ, err = mergeAttr(n.Declarator.Type(), attr); err != nil {
 			c.errors.add(errorf("%v", err))
+		}
+		if n.Declarator.applyMode(c) {
+			t = n.Declarator.Type()
 		}
 	}
 	if n.Asm != nil {
@@ -2231,6 +2240,9 @@ func (n *Declarator) check(c *ctx, t Type) (r Type) {
 			}
 		}
 	}
+	if n.applyMode(c) {
+		r = n.Type()
+	}
 	if n.IsParam() {
 		n.typ = r.Decay()
 	}
@@ -2777,6 +2789,8 @@ func (n *AttributeValue) check(c *ctx, attr *Attributes) {
 			attr.setAlwaysInline()
 		case "__gnu_inline__":
 			attr.setGNUInline()
+		case "__packed__", "packed":
+			c.checkPacked(n, attr)
 		}
 	case AttributeValueExpr: // IDENTIFIER '(' ArgumentExpressionList ')'
 		n.ArgumentExpressionList.check(c, decay|ignoreUndefined, &dummy)
@@ -2819,8 +2833,7 @@ func (n *AttributeValue) check(c *ctx, attr *Attributes) {
 			"__mode__",
 			"mode":
 
-			c.errors.add(errorf("%v: attribute mode is not supported", n.Position()))
-			return
+			c.checkMode(n, attr)
 		case
 			"__aligned__",
 			"aligned":
@@ -3339,6 +3352,7 @@ func (n *StructOrUnionSpecifier) check(c *ctx, isVolatile, isConst bool) (r Type
 		//	typedef struct __attribute__((aligned(16))) s { ... } T, *P;
 		//
 		// P would be a 16-aligned pointer.
+		packed := c.takePacked(attr)
 		var defAlign int
 		if attr != nil {
 			defAlign = int(attr.Aligned())
@@ -3348,10 +3362,12 @@ func (n *StructOrUnionSpecifier) check(c *ctx, isVolatile, isConst bool) (r Type
 		case n.StructOrUnion.Case == StructOrUnionUnion:
 			t := c.newUnionType(n.LexicalScope(), tag, nil, -1, 1, attr)
 			t.defAlign = defAlign
+			t.packed = packed
 			n.typ = t
 		default:
 			t := c.newStructType(n.LexicalScope(), tag, nil, -1, 1, attr)
 			t.defAlign = defAlign
+			t.packed = packed
 			n.typ = t
 		}
 
@@ -3422,6 +3438,7 @@ func (n *StructDeclarationList) check(c *ctx, s *StructOrUnionSpecifier, isVolat
 		// trc("fld %q.%d at %p, set parent type %s", f.Name(), f.Index(), f, s.Type())
 		f.parentType = s.Type()
 	}
+	c.packFields(s.typ, fields)
 	a := &fieldAllocator{align: 1, fields: fields, list: n, bigEndian: c.ast.ABI.isBigEndian()}
 	switch x := s.typ.(type) {
 	case *StructType:
@@ -3753,7 +3770,11 @@ func (n *StructDeclaration) check(c *ctx, isVolatile0, isConst0 bool) (r []*Fiel
 					f.align = alignas
 				}
 			}
-			if attr := n.AttributeSpecifierList.check(c); attr != nil && attr.Aligned() > 0 && len(r) != 0 {
+			attr := n.AttributeSpecifierList.check(c)
+			if attr != nil && len(attr.packed) != 0 && len(r) != 0 && r[len(r)-1] != nil {
+				c.packMember(attr.packed, r[len(r)-1])
+			}
+			if attr != nil && attr.Aligned() > 0 && len(r) != 0 {
 				if f := r[len(r)-1]; f != nil && !f.IsBitfield() {
 					f.align = mathutil.Max(f.align, int(attr.Aligned()))
 				}

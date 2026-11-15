@@ -1295,7 +1295,12 @@ func (p *parser) attributeValueListOpt() (r *AttributeValueList) {
 	prev := r
 	for p.rune(false) == ',' {
 		avl := &AttributeValueList{Token: p.shift(false), AttributeValue: p.attributeValue()}
-		prev.AttributeValueList = avl
+		if prev == nil {
+			r = avl
+		} else {
+			prev.AttributeValueList = avl
+		}
+		prev = avl
 	}
 	return r
 }

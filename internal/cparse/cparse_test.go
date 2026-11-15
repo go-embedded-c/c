@@ -115,10 +115,11 @@ func TestGeneratePredefinedMatchesCommitted(t *testing.T) {
 }
 
 // The corpora: how many files cc/v4 takes. A front-end bump must not lower
-// the floors. gcc 15.2.0 torture: 1881 / 1890. Eight of the nine refusals are
+// the floors. gcc 15.2.0 torture: 1866 / 1890. Eight of the refusals are
 // wasi-libc's own #error (signal.h, setjmp.h, sys/mman.h), which clang
 // refuses too; pr117432.c uses C23 `f(...)` with no named parameter, which
-// cc/v4 does not take. The refused files are logged, the first twenty.
+// cc/v4 does not take; the others are a packed bit-field or a mode on a vector
+// type, not implemented. The refused files are logged, the first twenty.
 func corpusRate(t *testing.T, env string, lvl cparse.Level, floor int) {
 	dir := oracletest.Dir(t, env)
 	tc := oracletest.Require(t)
@@ -153,9 +154,11 @@ func corpusRate(t *testing.T, env string, lvl cparse.Level, floor int) {
 
 func TestCorpusCTestsuite(t *testing.T) { corpusRate(t, "CORACLE_CTESTSUITE", cparse.Check, 217) }
 
-// 1881 until the mode attribute was refused (2026-11-14): the 14 files that
-// use it type-checked with the attribute ignored, the wrong sizes.
-func TestCorpusGCCTorture(t *testing.T) { corpusRate(t, "CORACLE_GCC_TORTURE", cparse.Check, 1867) }
+// 1881 while cc/v4 ignored the mode and packed attributes, with the wrong
+// sizes; 1867 with mode refused (2026-11-14); 1866 with both implemented
+// (2026-11-15), a packed bit-field and a mode on a vector type refused
+// (go-embedded-c/c#42).
+func TestCorpusGCCTorture(t *testing.T) { corpusRate(t, "CORACLE_GCC_TORTURE", cparse.Check, 1866) }
 
 // FuzzSource: the front end is fed untrusted text. It may refuse anything;
 // it must not panic.
@@ -165,6 +168,8 @@ func FuzzSource(f *testing.F) {
 	f.Add([]byte("struct s { int a : 3; } x = { .a = 1 };\n#define M(a, ...) a ## __VA_ARGS__\nint y = M(1,2);"))
 	f.Add([]byte("#if 1 +\n#endif\n#include \"\"\n"))
 	f.Add([]byte("_Static_assert(sizeof(long) == 4, \"ilp32\");\nvoid g(void) { goto l; l: switch (1) { default: break; } }"))
+	f.Add([]byte(modeSource))
+	f.Add([]byte(packedSource))
 	f.Fuzz(func(t *testing.T, src []byte) {
 		if len(src) > 4096 {
 			return
@@ -203,6 +208,10 @@ var formerPanics = []struct{ src, msg, control string }{
 	{"void f(long char);", "missed/failed type check", "void f(long);"},
 	{"void f(int float x) {}", "missed/failed type check", "void f(int x) {}"},
 	{"int float y; int (*fp)(long char);", "missed/failed type check", "int y; int (*fp)(long);"},
+	// A ',' after a refused first attribute value: the list was nil
+	// (FuzzSource, 2026-11-15, once seeded with attributes).
+	{"(000000 000 __attribute 0!00,", "expected direct declarator", "int x __attribute__((unused, used));"},
+	{"int x __attribute__((0, used));", "expected attribute value", "int x __attribute__((unused, used));"},
 }
 
 // TestEmptyVariadicArguments: `M()` for `M(A,...)` gives A and __VA_ARGS__
@@ -221,23 +230,123 @@ func TestEmptyVariadicArguments(t *testing.T) {
 	}
 }
 
-// TestModeAttributeRefused: cc/v4 ignored __attribute__((mode(QI))), so the
-// type kept its declared size (4 bytes where clang gives 1); the generator
-// then wrote past packed members (gcc torture memclr.c, misalign.c). The
-// patch refuses it; another attribute on the same typedef is the control.
-func TestModeAttributeRefused(t *testing.T) {
-	for _, src := range []string{
-		"typedef unsigned int __attribute__((mode(QI))) u8;",
-		"typedef unsigned int __attribute__((__mode__(__DI__))) u64;",
-		"typedef int __attribute__ ((mode (SI))) i32;",
+// modeSource gives declarations the width of their mode attribute in each
+// place the attribute is written. clang 23.1.4 (wasm32-wasip1, -std=gnu17
+// -fsyntax-only) holds every assertion, measured 2026-11-15.
+const modeSource = `typedef int w __attribute__((mode(word)));
+typedef int p __attribute__((mode(pointer)));
+typedef int b __attribute__((__mode__(__byte__)));
+typedef char c8 __attribute__((mode(QI)));
+typedef unsigned char uc16 __attribute__((mode(HI)));
+typedef float f8 __attribute__((mode(DF)));
+typedef double d4 __attribute__((mode(SF)));
+enum E { A, B };
+enum N { M = -1, P };
+struct s { enum E __attribute__((mode(byte))) e; enum N __attribute__((mode(byte))) n; };
+struct s v;
+typedef unsigned int __attribute__((mode(QI))) u8;
+u8 *pu8;
+typedef const unsigned int __attribute__((mode(QI))) cu8;
+cu8 *pc, c1;
+_Static_assert(sizeof(*pc) == 1 && sizeof c1 == 1, "a typedef with another attribute");
+typedef unsigned int u64 __attribute__((__mode__(__DI__)));
+typedef unsigned int a8 __attribute__((mode(QI))), a32;
+int x __attribute__((mode(HI)));
+const int __attribute__((mode(QI))) cq = 1;
+_Static_assert(sizeof(w) == 4 && sizeof(p) == 4 && sizeof(b) == 1, "word, pointer, byte");
+_Static_assert((c8)-1 < 0 && (uc16)-1 > 0 && sizeof(uc16) == 2, "signedness kept");
+_Static_assert(sizeof(f8) == 8 && sizeof(d4) == 4, "floating modes");
+_Static_assert(sizeof(struct s) == 2 && (__typeof__(v.e))-1 > 0 && (__typeof__(v.n))-1 < 0, "enumeration members");
+_Static_assert(sizeof(*pu8) == 1, "through a typedef and a pointer");
+_Static_assert(sizeof(u64) == 8 && (u64)-1 > 0, "after the declarator");
+_Static_assert(sizeof(a8) == 1 && sizeof(a32) == 4, "after one declarator only");
+_Static_assert(sizeof x == 2 && sizeof cq == 1, "variables");
+int f(int __attribute__((mode(QI))) a) { _Static_assert(sizeof a == 1, "a parameter"); return a; }
+`
+
+// TestModeAttribute: cc/v4 ignored __attribute__((mode(QI))), so the type
+// kept its declared size (4 bytes where clang gives 1), and the generator
+// wrote past packed members (gcc torture memclr.c, misalign.c). The patch
+// gives the declaration the mode's type, and refuses the attribute where no
+// declarator takes it, or where clang would not apply it either.
+func TestModeAttribute(t *testing.T) {
+	if err := front(t).Source("m.c", []byte(modeSource), cparse.Check); err != nil {
+		var pe *cparse.PanicError
+		if errors.As(err, &pe) {
+			t.Fatal(pe.Stack)
+		}
+		t.Fatal(err)
+	}
+	for _, k := range []struct{ src, msg string }{
+		{"int y = (int __attribute__((mode(QI))))300;", "attribute mode is not supported here"},
+		{"struct t { int a __attribute__((mode(QI))); };", "attribute mode is not supported here"},
+		{"typedef int __attribute__((mode(TI))) t;", "no type of 128 bits"},
+		{"typedef int __attribute__((mode(SF))) t;", "attribute mode SF on a type that is not floating"},
+		{"typedef float __attribute__((mode(SI))) t;", "attribute mode SI on a type that is not an integer"},
+		{"int __attribute__((mode(QI))) *q;", "attribute mode QI on a type that is not an integer"},
+		{"typedef int __attribute__((mode(XQ))) t;", "attribute mode XQ is not supported"},
+		{"typedef int __attribute__((mode(QI))) __attribute__((mode(HI))) t;", "conflicting mode attributes: QI and HI"},
+		{"typedef int __attribute__((mode(1))) t;", "attribute mode expects one identifier"},
 	} {
-		err := front(t).Source("m.c", []byte(src), cparse.Check)
-		if err == nil || !strings.Contains(err.Error(), "attribute mode is not supported") {
-			t.Errorf("%q: %v, want the mode attribute refused", src, err)
+		err := front(t).Source("m.c", []byte(k.src), cparse.Check)
+		if err == nil || !strings.Contains(err.Error(), k.msg) {
+			t.Errorf("%q: %v, want %q", k.src, err, k.msg)
 		}
 	}
-	if err := front(t).Source("m.c", []byte("typedef unsigned int __attribute__((aligned(8))) u;"), cparse.Check); err != nil {
-		t.Errorf("control: %v", err)
+}
+
+// packedSource lays out packed structs and unions in each place the
+// attribute is written. clang 23.1.4 (wasm32-wasip1, -std=gnu17
+// -fsyntax-only, with <stddef.h>'s offsetof) holds every assertion, measured
+// 2026-11-15.
+const packedSource = `#define offsetof(t, m) __builtin_offsetof(t, m)
+struct __attribute__((packed)) p1 { char x; long long y; short z; };
+struct p2 { char x; long long y; short z; } __attribute__((__packed__));
+typedef struct { char c; int i; } __attribute__((packed)) p3;
+struct p4 { char c; int i __attribute__((packed)); short s; };
+struct p5 { char c; double d __attribute__((aligned(2), packed)); };
+struct p6 { char c; int i; } __attribute__((packed)) __attribute__((aligned(4)));
+union __attribute__((packed)) u1 { char c; int i; };
+struct n1 { char c; struct p1 m; };
+struct n2 { char c; struct p6 m; };
+struct p7 { char c; char a, *b __attribute__((packed)); };
+struct p8 { char c; int *a, b __attribute__((packed)); };
+struct p10 { char c; int i __attribute__((unused, packed, deprecated)); };
+_Static_assert(offsetof(struct p10, i) == 1, "the middle of three attributes");
+struct __attribute__((aligned(4))) p9 { char c; int i; } __attribute__((packed));
+_Static_assert(sizeof(struct p9) == 8 && _Alignof(struct p9) == 4 && offsetof(struct p9, i) == 1, "aligned before the tag, packed after the brace");
+_Static_assert(sizeof(struct p1) == 11 && _Alignof(struct p1) == 1 && offsetof(struct p1, z) == 9, "before the tag");
+_Static_assert(sizeof(struct p2) == 11 && offsetof(struct p2, y) == 1, "after the brace");
+_Static_assert(sizeof(p3) == 5 && _Alignof(p3) == 1, "typedef of an unnamed struct");
+_Static_assert(offsetof(struct p4, i) == 1 && offsetof(struct p4, s) == 6 && sizeof(struct p4) == 8 && _Alignof(struct p4) == 2, "one member");
+_Static_assert(offsetof(struct p5, d) == 2 && sizeof(struct p5) == 10 && _Alignof(struct p5) == 2, "aligned and packed member");
+_Static_assert(sizeof(struct p6) == 8 && _Alignof(struct p6) == 4 && offsetof(struct p6, i) == 1, "packed and aligned struct");
+_Static_assert(sizeof(union u1) == 4 && _Alignof(union u1) == 1, "union");
+_Static_assert(offsetof(struct n1, m) == 1 && sizeof(struct n1) == 12, "a packed struct as a member");
+_Static_assert(offsetof(struct n2, m) == 4 && sizeof(struct n2) == 12, "a packed and aligned struct as a member");
+_Static_assert(offsetof(struct p7, b) == 2 && offsetof(struct p8, a) == 4 && sizeof(struct p8) == 12, "after the last declarator only");
+`
+
+// TestPackedAttribute: cc/v4 ignored __attribute__((packed)), and a packed
+// struct kept an unpacked layout (sizeof 24 where clang gives 11; gcc torture
+// misalign.c wrote past its member). The patch packs the members of a packed
+// definition and a packed member, and refuses what it does not implement and
+// the attribute where nothing takes it.
+func TestPackedAttribute(t *testing.T) {
+	if err := front(t).Source("p.c", []byte(packedSource), cparse.Check); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []struct{ src, msg string }{
+		{"struct __attribute__((packed)) s { int g : 31; int h : 6; };", "attribute packed on a bit-field is not supported"},
+		{"struct s { unsigned long w : 32 __attribute__((packed)); };", "attribute packed"},
+		{"enum e { A, B } __attribute__((packed));", "attribute packed is not supported here"},
+		{"__attribute__((packed)) int x;", "attribute packed is not supported here"},
+		{"struct s { __attribute__((packed)) int x; };", "attribute packed is not supported here"},
+	} {
+		err := front(t).Source("p.c", []byte(k.src), cparse.Check)
+		if err == nil || !strings.Contains(err.Error(), k.msg) {
+			t.Errorf("%q: %v, want %q", k.src, err, k.msg)
+		}
 	}
 }
 

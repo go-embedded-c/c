@@ -1040,6 +1040,7 @@ type Field struct {
 	inOverlapGroup        bool
 	isBitField            bool
 	isFlexibleArrayMember bool
+	packed                bool // go-embedded-c patch, see packed.go
 }
 
 func (n *Field) clone() (r *Field) {
@@ -1160,7 +1161,13 @@ func (n *Field) Offset() int64 { return n.offsetBytes }
 
 // alignment reports the alignment n is allocated at: the alignment of its type,
 // or more if _Alignas or an aligned attribute on the member asks for it.
-func (n *Field) alignment() int { return max(n.Type().Align(), n.align) }
+func (n *Field) alignment() int {
+	if n.packed {
+		return max(1, n.align)
+	}
+
+	return max(n.Type().Align(), n.align)
+}
 
 // OuterGroupOffset reports the non-overlapping group offset of n in bytes. If
 // n is not a bit field the value is the same as Offset(). If n is a bit field
@@ -1181,7 +1188,8 @@ type structType struct {
 	tag    Token
 
 	align         int
-	defAlign      int // From an aligned attribute of the definition, see StructOrUnionSpecifier.check.
+	defAlign      int             // From an aligned attribute of the definition, see StructOrUnionSpecifier.check.
+	packed        *AttributeValue // go-embedded-c patch, see packed.go
 	padding       int
 	isComplete    bool // Memoized isIncompleteInner() == false, see (*StructType).isIncompleteInner.
 	isIncomplete0 bool
@@ -2703,6 +2711,9 @@ type Attributes struct {
 	isNonZero    bool
 	isVolatile   bool
 	weak         bool
+
+	mode   []*AttributeValue // __attribute__((mode(…))), see Declarator.applyMode (go-embedded-c patch)
+	packed []*AttributeValue // __attribute__((packed)), see packed.go (go-embedded-c patch)
 }
 
 func newAttributes() *Attributes {
@@ -2903,6 +2914,9 @@ func (n *Attributes) merge(nd Node, m *Attributes) (r *Attributes, err error) {
 	case n.gnuInline || m.gnuInline:
 		r.gnuInline = true
 	}
+
+	r.mode = append(append([]*AttributeValue(nil), n.mode...), m.mode...)
+	r.packed = append(append([]*AttributeValue(nil), n.packed...), m.packed...)
 
 	var ok bool
 	r.customAttributes, ok = mergeCustomAttributes(n.customAttributes, m.customAttributes)
