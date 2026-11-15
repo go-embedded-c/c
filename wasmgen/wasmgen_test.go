@@ -56,7 +56,6 @@ func TestUnsupported(t *testing.T) {
 		{"void f(int n) { struct S { int i[n]; int k; } s; } int main(void) { f(1); return 0; }", "local of type struct S {i array of int; k int}"},
 		{"int f(int n, void *p) { struct S { int i[n]; int k; } *s = p; return s->k; } int main(void) { return 0; }", "local of type pointer to struct S"},
 		{"int g(int n) { __builtin_va_start(n, n); return 0; } int main(void) { return g(1); }", "va_start outside a variadic function"},
-		{"struct S { long long a: 24; }; int main(void) { struct S s; s.a = 1; return s.a; }", "bit-field of a type wider than int, narrower than int"},
 		{"int x; struct S { int a: 3; } s = {x}; int main(void) { return 0; }", "non-constant bit-field initializer"},
 		// A packed bit-field of 64 bits from bit 3 spans 9 bytes, more than
 		// any wasm access.
@@ -352,6 +351,7 @@ func TestAgainstClang(t *testing.T) {
 		modeProgram,
 		packedProgram,
 		bitfieldLayoutProgram,
+		bitfieldTypeProgram,
 		// long double (binary128): storage, parameters, results, every
 		// operation, comparison and conversion, varargs
 		quadProgram,
@@ -500,6 +500,26 @@ int main(void) {
 	HEAD(union u); SET(union u, x); SET(union u, y);
 	HEAD(union up); SET(union up, x);
 	{ struct pk p = { -5, 17, 'q' }; struct pk3 q = { 2, -3LL, 100, 'z' }; printf("\n%d %d %c %d %lld %d %c\n", p.g, p.h, p.c, q.a, (long long)q.l, q.s, q.z); }
+	return 0;
+}
+`
+
+// bitfieldTypeProgram: the type a bit-field has in expressions, by its
+// declared type and width (clang isPromotableBitField: narrower than int,
+// int; as wide, int or unsigned by the declared signedness; wider, the
+// declared type), seen through its size and signedness, arithmetic, and the
+// arguments it makes to `...`.
+const bitfieldTypeProgram = `#include <stdio.h>
+#define T(e) (int)(sizeof(e) * 10 + ((e) * 0 - 1 < 0))
+struct s { long long a:24; unsigned long long b:31; long long c:32; unsigned long long d:32; long long e:33; unsigned long long f:40; long g:32; unsigned h:32; int i:7; };
+int main(void) {
+	struct s v = { -5, 0x7fffffff, -7, 0xfffffff0u, -9, 0xffffffffffULL, -11, 0xfffffff5u, -3 };
+	printf("%d %d %d %d %d %d %d %d %d\n", T(v.a + 0), T(v.b + 0), T(v.c + 0), T(v.d + 0), T(v.e + 0), T(v.f + 0), T(v.g + 0), T(v.h + 0), T(v.i + 0));
+	printf("%d %d %d %d %d\n", T(-v.a), T(~v.c), T(-v.d), T(-v.e), T(+v.g));
+	printf("%d %d %d %u %lld %llu %d %u %d\n", v.a, v.b, v.c, v.d, v.e, v.f, v.g, v.h, v.i);
+	printf("%d %u %lld %d\n", v.a * 2 - 1, v.d + 32u, v.e << 20, v.b > -1);
+	v.a += 0x7fffff; v.c = v.c * 3; v.e -= 1; v.i = v.a;
+	printf("%d %d %lld %d\n", v.a, v.c, v.e, v.i);
 	return 0;
 }
 `

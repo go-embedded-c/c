@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float`, `double` and `long double` (binary128), bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), `asm` statements with an empty template, the `mode` and `packed` attributes, and clang's bit-field layout. 1567 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float`, `double` and `long double` (binary128), bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), `asm` statements with an empty template, the `mode` and `packed` attributes, and clang's bit-field layout and promotion. 1577 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -294,8 +294,15 @@ W6 adds bit-fields:
   - A packed bit-field goes at the next free bit. Its storage unit is the
     bytes it spans, rounded to 1, 2, 4 or 8, and may be misaligned. One
     that spans 9 bytes is refused.
-- A bit-field of a type wider than `int` but narrower than 32 bits is
-  refused. cc/v4 types it `int`, while clang keeps its declared type.
+- A bit-field's type in expressions follows clang's promotion
+  (`isPromotableBitField`, as gcc does), whatever its declared type:
+  - narrower than `int`: `int`;
+  - as wide as `int`: `int` or `unsigned int`, by the declared type's
+    signedness;
+  - wider: the declared type.
+
+  So `long long x:24` is an `int`. It is read in its 64-bit unit and then
+  converted.
 
 `asm` statements with an empty template, the optimisation barriers of the
 gcc torture tests (`asm volatile ("" : : : "memory")`, `asm ("" : "+r" (x))`,
@@ -457,8 +464,9 @@ does for structures, is the fifth):
   misaligning a `long long` in the varargs buffer, on the side that is
   ours.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-15, with the Itanium bit-field layout, 1567 files ran the same as
-  under clang, 12 gained and none lost (1555 with the `mode` and `packed`
+  2026-11-15, with `long long` bit-fields as narrow as `int`, 1577 files ran
+  the same as under clang, 10 gained and none lost (1567 with the Itanium
+  bit-field layout, 12 gained and none lost, 1555 with the `mode` and `packed`
   attributes, eight gained and five lost to the then refusal of packed
   bit-fields, 1552 with the empty-template `asm` statements, 1502 with
   `long double`, 1477 with static member addresses and the floating-point builtins in

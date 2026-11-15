@@ -333,6 +333,16 @@ var patches = []filePatch{
 	},
 	{
 		File: "check.go",
+		Why:  "a bit-field as wide as int promotes to int or unsigned int by its declared type's signedness, whatever that type (clang ASTContext::isPromotableBitField, matching gcc): `long long x:32` is an int, not a long long (go-embedded-c/c#29)",
+		Old:  "\t\t\tif f.ValueBits() < c.intT.Size()*8 {\n\t\t\t\tx = c.intT.(*PredefinedType)\n\t\t\t}\n",
+		New: "\t\t\tswitch w := c.intT.Size() * 8; {\n" +
+			"\t\t\tcase f.ValueBits() < w:\n\t\t\t\tx = c.intT.(*PredefinedType)\n" +
+			"\t\t\tcase f.ValueBits() == w && IsSignedInteger(x):\n\t\t\t\tx = c.intT.(*PredefinedType)\n" +
+			"\t\t\tcase f.ValueBits() == w:\n\t\t\t\tx = c.ast.kinds[UInt].(*PredefinedType)\n" +
+			"\t\t\t}\n",
+	},
+	{
+		File: "check.go",
 		Why:  "and in unions, where an unnamed bit-field aligned the union",
 		Old:  "\t\tn.checkUnion(c, a, fields)\n",
 		New:  "\t\tif c.itaniumLayout() && hasBitfield(fields) {\n\t\t\tc.layoutUnion(a, fields)\n\t\t} else {\n\t\t\tn.checkUnion(c, a, fields)\n\t\t}\n",
