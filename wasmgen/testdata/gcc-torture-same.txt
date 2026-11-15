@@ -104,6 +104,7 @@
 20010518-2.c
 20010520-1.c
 20010604-1.c
+20010605-2.c
 20010711-1.c
 20010717-1.c
 20010723-1.c
@@ -152,6 +153,7 @@
 20020402-3.c
 20020404-1.c
 20020406-1.c
+20020411-1.c
 20020413-1.c
 20020418-1.c
 20020423-1.c
@@ -329,6 +331,7 @@
 20070212-3.c
 20070424-1.c
 20070517-1.c
+20070614-1.c
 20070623-1.c
 20070724-1.c
 20070824-1.c
@@ -738,6 +741,7 @@ builtins/20010124-1.c
 builtins/abs-1-lib.c
 builtins/abs-1.c
 builtins/abs-2.c
+builtins/complex-1-lib.c
 builtins/fputs-lib.c
 builtins/lib/abs.c
 builtins/lib/bfill.c
@@ -815,6 +819,8 @@ complex-1.c
 complex-2.c
 complex-3.c
 complex-4.c
+complex-5.c
+complex-6.c
 compndlit-1.c
 const-addr-expr-1.c
 conversion.c

@@ -423,10 +423,13 @@ func (g *fgen) compare(a, b cc.ExpressionNode, signed, unsigned byte) error {
 		g.op(unsigned)
 		return nil
 	}
-	if isCx(a.Type()) || isCx(b.Type()) {
+	if isCx(a.Type()) || isCx(b.Type()) || isLDCx(a.Type()) || isLDCx(b.Type()) {
 		// Complex numbers have equality only (C11 6.5.9).
 		if signed != opI32Eq && signed != opI32Ne {
 			return unsupported(a, "ordering of complex numbers")
+		}
+		if isLDCx(a.Type()) || isLDCx(b.Type()) || isLD(a.Type()) || isLD(b.Type()) {
+			return g.ldcxEqual(a, b, signed == opI32Eq)
 		}
 		return g.cxEqual(a, b, signed == opI32Eq)
 	}
@@ -512,8 +515,8 @@ func (g *fgen) unary(x *cc.UnaryExpression, s scalar) error {
 	case cc.UnaryExpressionReal, cc.UnaryExpressionImag:
 		return g.cxPart(x.UnaryExpression, x.Case == cc.UnaryExpressionImag, s)
 	case cc.UnaryExpressionNot:
-		if isCx(x.CastExpression.Type()) {
-			if err := g.cxTruth(x.CastExpression); err != nil {
+		if isCx(x.CastExpression.Type()) || isLDCx(x.CastExpression.Type()) {
+			if err := g.condition(x.CastExpression); err != nil {
 				return err
 			}
 			g.op(opI32Eqz)
@@ -843,7 +846,10 @@ var binaryOps = map[cc.AssignmentExpressionCase][2]byte{ // signed, unsigned
 // E1's address and value, which a call in E2 can observe (gcc torture
 // pr58943.c: x[0] |= foo(), where foo changes x[0]).
 func (g *fgen) assign(x *cc.AssignmentExpression, want bool) error {
-	if isCx(x.UnaryExpression.Type()) {
+	if isLDCx(x.AssignmentExpression.Type()) && (x.Case == cc.AssignmentExpressionMul || x.Case == cc.AssignmentExpressionDiv) && !isLDCx(x.UnaryExpression.Type()) {
+		return unsupported(x, "scalar *= or /= of a complex value")
+	}
+	if isCx(x.UnaryExpression.Type()) || isLDCx(x.UnaryExpression.Type()) {
 		// Only effect gets here with a complex E1 (aggAddr takes the value).
 		if err := g.aggAddr(x); err != nil {
 			return err

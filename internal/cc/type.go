@@ -2441,6 +2441,27 @@ func IsSignedInteger(t Type) bool {
 //
 //	[0] 6.3.1.8 Usual arithmetic conversions
 func UsualArithmeticConversions(a, b Type) (r Type) {
+	r = usualArithmeticConversions(a, b)
+	if complexKinds[r.Kind()] || !complexKinds[a.Kind()] && !complexKinds[b.Kind()] {
+		return r
+	}
+
+	p, ok := r.(*PredefinedType)
+	if !ok {
+		return r
+	}
+
+	for ck, rk := range correspondingRealKinds {
+		if complexKinds[ck] && rk == r.Kind() {
+			if t := p.c.ast.kinds[Kind(ck)]; t != nil {
+				return t
+			}
+		}
+	}
+	return r
+}
+
+func usualArithmeticConversions(a, b Type) (r Type) {
 	defer func(a, b Type) {
 		x := a.BitField()
 		y := b.BitField()

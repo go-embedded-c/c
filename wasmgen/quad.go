@@ -123,6 +123,10 @@ func (g *fgen) ldAddr(e cc.ExpressionNode) error {
 	}
 	defer func() { g.depth-- }()
 	e = strip(e)
+	if isLDCx(e.Type()) {
+		// Its real part, at the start of its 32 bytes (ldcx.go).
+		return g.aggAddr(e)
+	}
 	if !isLD(e.Type()) {
 		return g.ldFromScalar(e)
 	}
@@ -145,7 +149,7 @@ func (g *fgen) ldAddr(e cc.ExpressionNode) error {
 			return g.ldAddr(x.CastExpression)
 		case cc.UnaryExpressionMinus:
 			return g.ldNeg(x.CastExpression)
-		case cc.UnaryExpressionDeref:
+		case cc.UnaryExpressionDeref, cc.UnaryExpressionReal, cc.UnaryExpressionImag:
 			return g.addr(x)
 		case cc.UnaryExpressionInc, cc.UnaryExpressionDec:
 			return g.ldIncDec(x.UnaryExpression, x.Case == cc.UnaryExpressionInc, false, true)
@@ -323,7 +327,8 @@ func (g *fgen) ldFromStack(from scalar) {
 
 // operand pushes the value of e converted to to; e may be a long double.
 func (g *fgen) operand(e cc.ExpressionNode, to scalar) error {
-	if isLD(e.Type()) {
+	if isLD(e.Type()) || isLDCx(e.Type()) {
+		// A long double _Complex in a scalar context: its real part.
 		return g.ldToScalar(e, to)
 	}
 	from, err := g.rvalue(e)

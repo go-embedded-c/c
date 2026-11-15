@@ -112,7 +112,7 @@ func isAggregate(t cc.Type) bool {
 		return false
 	}
 	k := t.Kind()
-	return k == cc.Struct || k == cc.Union || isCx(t)
+	return k == cc.Struct || k == cc.Union || isCx(t) || isLDCx(t)
 }
 
 // passing is how BasicCABI.md passes a value of a type, as a parameter or
@@ -134,7 +134,7 @@ func abiOf(t cc.Type) (passing, scalar, bool) {
 	if isLD(t) {
 		return passQuad, scalar{vt: wasm.I64, bits: 64}, true
 	}
-	if isCx(t) {
+	if isCx(t) || isLDCx(t) {
 		// A struct of two parts, never a singleton (probed: clang passes
 		// double _Complex through a pointer, returns it through sret).
 		return passIndirect, scalar{vt: wasm.I32, bits: 32, ptr: true, elem: t.Size()}, true

@@ -325,6 +325,9 @@ func (g *fgen) condition(e cc.ExpressionNode) error {
 	if isCx(e.Type()) {
 		return g.cxTruth(e)
 	}
+	if isLDCx(e.Type()) {
+		return g.ldcxTruth(e)
+	}
 	from, err := g.rvalue(e)
 	if err != nil {
 		return err

@@ -102,7 +102,7 @@ func (g *fgen) cxPartAddr(e cc.ExpressionNode, imag bool) error {
 		return err
 	}
 	if imag {
-		g.constant(int64(cxElem(e.Type()).bits/8), intScalar)
+		g.constant(e.Type().Size()/2, intScalar)
 		g.op(opI32Add)
 	}
 	return nil
@@ -162,6 +162,14 @@ func (g *fgen) cxStore(t cc.Type, re, im uint32) {
 // aggAddrAs pushes the address of the value of e converted to t, an
 // aggregate: a complex t takes e of any arithmetic type.
 func (g *fgen) aggAddrAs(e cc.ExpressionNode, t cc.Type) error {
+	if isLDCx(t) && !isLDCx(e.Type()) {
+		p, _, err := g.ldcxParts(e)
+		if err != nil {
+			return err
+		}
+		g.ldcxStore(p.re, p.im)
+		return nil
+	}
 	if isCx(t) && !(isCx(e.Type()) && e.Type().Kind() == t.Kind()) {
 		p, _, err := g.parts(e, cxElem(t))
 		if err != nil {
@@ -189,6 +197,17 @@ func (g *fgen) cxComputed(e cc.ExpressionNode) (bool, error) {
 		return true, nil
 	}
 	switch x := strip(e).(type) {
+	case *cc.PostfixExpression:
+		if arg, ok := conjArg(x); ok {
+			// __builtin_conj, conjf, conjl: ~arg (GCC manual, Other Builtins).
+			p, _, err := g.parts(arg, cxElem(t))
+			if err != nil {
+				return true, err
+			}
+			g.cxNeg(p.im, p.el)
+			g.cxStore(t, p.re, p.im)
+			return true, nil
+		}
 	case *cc.AdditiveExpression:
 		switch x.Case {
 		case cc.AdditiveExpressionAdd:
@@ -262,6 +281,22 @@ func (g *fgen) cxComputed(e cc.ExpressionNode) (bool, error) {
 		return true, g.cxCompound(x, op)
 	}
 	return false, nil
+}
+
+// conjArg returns the argument of a call of __builtin_conj, conjf or conjl.
+func conjArg(x *cc.PostfixExpression) (cc.ExpressionNode, bool) {
+	if x.Case != cc.PostfixExpressionCall || x.ArgumentExpressionList == nil || x.ArgumentExpressionList.ArgumentExpressionList != nil {
+		return nil, false
+	}
+	d := functionDesignator(strip(x.PostfixExpression))
+	if d == nil {
+		return nil, false
+	}
+	switch d.Name() {
+	case "__builtin_conj", "__builtin_conjf", "__builtin_conjl":
+		return x.ArgumentExpressionList.AssignmentExpression, true
+	}
+	return nil, false
 }
 
 // cxConst returns the value of a constant expression of complex type: an

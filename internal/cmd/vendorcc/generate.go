@@ -342,6 +342,43 @@ var patches = []filePatch{
 			"\t\t\t}\n",
 	},
 	{
+		File: "type.go",
+		Why:  "the usual arithmetic conversions lost the complex domain when the other operand's real type ranked higher: long double + double _Complex was long double, double + float _Complex double, dropping the imaginary part; C11 6.3.1.8 converts \"without change of type domain\", and the result is complex when either operand is",
+		Old:  "func UsualArithmeticConversions(a, b Type) (r Type) {\n",
+		New: "func UsualArithmeticConversions(a, b Type) (r Type) {\n" +
+			"\tr = usualArithmeticConversions(a, b)\n" +
+			"\tif complexKinds[r.Kind()] || !complexKinds[a.Kind()] && !complexKinds[b.Kind()] {\n" +
+			"\t\treturn r\n\t}\n\n" +
+			"\tp, ok := r.(*PredefinedType)\n" +
+			"\tif !ok {\n\t\treturn r\n\t}\n\n" +
+			"\tfor ck, rk := range correspondingRealKinds {\n" +
+			"\t\tif complexKinds[ck] && rk == r.Kind() {\n" +
+			"\t\t\tif t := p.c.ast.kinds[Kind(ck)]; t != nil {\n\t\t\t\treturn t\n\t\t\t}\n\t\t}\n\t}\n" +
+			"\treturn r\n}\n\n" +
+			"func usualArithmeticConversions(a, b Type) (r Type) {\n",
+	},
+	{
+		File: "cc.go",
+		Why:  "the complex builtins were not declared, so __builtin_conj(z) was an implicit int function and its argument went unconverted",
+		Old:  "long double __builtin_fabsl(long double x);\n",
+		New: "long double __builtin_fabsl(long double x);\n" +
+			"double _Complex __builtin_conj(double _Complex z);\n" +
+			"float _Complex __builtin_conjf(float _Complex z);\n" +
+			"long double _Complex __builtin_conjl(long double _Complex z);\n" +
+			"double __builtin_creal(double _Complex z);\n" +
+			"float __builtin_crealf(float _Complex z);\n" +
+			"long double __builtin_creall(long double _Complex z);\n" +
+			"double __builtin_cimag(double _Complex z);\n" +
+			"float __builtin_cimagf(float _Complex z);\n" +
+			"long double __builtin_cimagl(long double _Complex z);\n",
+	},
+	{
+		File: "check.go",
+		Why:  "an imaginary constant with the L suffix (2.0iL) was typed _Complex long, an integer complex type, while its value is a long double one",
+		Old:  "return &ComplexLongDoubleValue{Im: (*LongDoubleValue)(bf)}, c.ast.kinds[ComplexLong]",
+		New:  "return &ComplexLongDoubleValue{Im: (*LongDoubleValue)(bf)}, c.ast.kinds[ComplexLongDouble]",
+	},
+	{
 		File: "check.go",
 		Why:  "and in unions, where an unnamed bit-field aligned the union",
 		Old:  "\t\tn.checkUnion(c, a, fields)\n",
