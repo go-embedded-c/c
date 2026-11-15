@@ -90,10 +90,17 @@ func (d *Declarator) applyMode(c *ctx) bool {
 	return true
 }
 
-// modeKind is the kind mode name gives a declaration of type t.
-func (c *ctx) modeKind(name string, t Type) (Kind, error) {
-	if t.VectorSize() > 0 {
-		return 0, fmt.Errorf("attribute mode on a vector type is not supported")
+// modeKind is the kind mode name gives a declaration of type t. On a
+// vector, the mode is its element's, and the vector keeps its size (clang
+// Sema::AddModeAttr, "Base type can also be a vector type": the element
+// count becomes the size over the new element's).
+func (c *ctx) modeKind(name string, t Type) (k Kind, err error) {
+	if v := t.VectorSize(); v > 0 {
+		defer func() {
+			if err == nil && (c.ast.ABI.Types[k].Size <= 0 || v%c.ast.ABI.Types[k].Size != 0) {
+				k, err = 0, fmt.Errorf("attribute mode %s on a vector of %d bytes", name, v)
+			}
+		}()
 	}
 
 	abi := c.ast.ABI

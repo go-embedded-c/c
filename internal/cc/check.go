@@ -4428,7 +4428,7 @@ func (n *EqualityExpression) check(c *ctx, mode flags) (r Type) {
 			// one operand is a pointer and the other is a null pointer constant.
 			isPointerType(a) && IsIntegerType(b) || isPointerType(b) && IsIntegerType(a):
 
-			n.typ = c.intT
+			n.typ = vectorCompare(a, b, c.intT)
 		default:
 			c.errors.add(errorf("%v: invalid operands: %s (%v) and %s (%v)", n.Token.Position(), NodeSource(n.EqualityExpression), a, NodeSource(n.RelationalExpression), b))
 		}
@@ -4487,7 +4487,7 @@ func (n *RelationalExpression) check(c *ctx, mode flags) (r Type) {
 			// gcc allows mixing ints and pointers
 			IsScalarType(a) && IsScalarType(b):
 
-			// ok
+			n.typ = vectorCompare(a, b, c.intT)
 		default:
 			c.errors.add(errorf("%v: invalid operands: %s and %s", n.Token.Position(), a, b))
 		}
@@ -4533,6 +4533,9 @@ func (n *ShiftExpression) check(c *ctx, mode flags) (r Type) {
 			c.errors.add(errorf("%v: operands shall be a scalars: %s and %s", n.Token.Position(), a, b))
 		default:
 			n.typ = IntegerPromotion(a)
+			if v := vectorOperand(a, b); v != nil {
+				n.typ = v
+			}
 			if b := a.BitField(); b != nil {
 				if t, ok := n.typ.(*PredefinedType); ok {
 					n.typ = t.setBitField(b)
@@ -4999,9 +5002,9 @@ out:
 		case isPointerType(t2) && IsIntegerType(t1):
 			n.typ = t2.(*PointerType).Elem().Decay()
 		case isVectorType(t1) && IsIntegerType(t2):
-			n.typ = t1
+			n.typ = vectorElem(t1)
 		case isVectorType(t2) && IsIntegerType(t1):
-			n.typ = t2
+			n.typ = vectorElem(t2)
 		default:
 			c.errors.add(errorf("%v: one of the expressions shall be a pointer and the other shall have integer type: %s and %s", n.Token.Position(), t1, t2))
 			n.typ = c.intT

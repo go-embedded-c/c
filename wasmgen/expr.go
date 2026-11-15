@@ -346,6 +346,18 @@ func (g *fgen) rvalue(e cc.ExpressionNode) (scalar, error) {
 		if x.Case == cc.CastExpressionUnary {
 			return g.rvalue(x.UnaryExpression)
 		}
+		if v := x.CastExpression; isVec(v.Type()) {
+			// A vector cast to a scalar of its size keeps the bytes (vec.go).
+			if v.Type().Size() != t.Size() || s.ptr {
+				return s, unsupported(x, "cast of "+typeName(v.Type())+" to "+typeName(t))
+			}
+			if err := g.aggAddr(v); err != nil {
+				return s, err
+			}
+			op, align := s.load()
+			g.memargOff(op, align, 0)
+			return s, nil
+		}
 		return s, g.operand(x.CastExpression, s)
 	case *cc.UnaryExpression:
 		if x.Case == cc.UnaryExpressionLabelAddr {
@@ -849,8 +861,9 @@ func (g *fgen) assign(x *cc.AssignmentExpression, want bool) error {
 	if isLDCx(x.AssignmentExpression.Type()) && (x.Case == cc.AssignmentExpressionMul || x.Case == cc.AssignmentExpressionDiv) && !isLDCx(x.UnaryExpression.Type()) {
 		return unsupported(x, "scalar *= or /= of a complex value")
 	}
-	if isCx(x.UnaryExpression.Type()) || isLDCx(x.UnaryExpression.Type()) {
-		// Only effect gets here with a complex E1 (aggAddr takes the value).
+	if isCx(x.UnaryExpression.Type()) || isLDCx(x.UnaryExpression.Type()) || isVec(x.UnaryExpression.Type()) && x.Case != cc.AssignmentExpressionAssign {
+		// Only effect gets here with a complex or vector E1 (aggAddr takes
+		// the value).
 		if err := g.aggAddr(x); err != nil {
 			return err
 		}

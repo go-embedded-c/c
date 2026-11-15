@@ -443,7 +443,7 @@ func (n *PredefinedType) VectorSize() int64 {
 func (n *PredefinedType) setAttr(a *Attributes) Type {
 	var vec *ArrayType
 	if sz := a.VectorSize(); sz > 0 {
-		vec = n.c.newArrayType(n, sz, nil)
+		vec = n.c.newArrayType(n, vectorElems(n, sz), nil)
 	}
 	m := *n
 	m.vector = vec
@@ -490,6 +490,10 @@ func (n *PredefinedType) Align() int {
 		}
 	}
 
+	if v := n.VectorSize(); v > 0 {
+		return int(v)
+	}
+
 	if x, ok := n.c.ast.ABI.Types[n.kind]; ok {
 		return x.Align
 	}
@@ -507,6 +511,10 @@ func (n *PredefinedType) Undecay() Type { return n }
 func (n *PredefinedType) FieldAlign() int {
 	if n == nil {
 		return 1
+	}
+
+	if v := n.VectorSize(); v > 0 {
+		return int(v)
 	}
 
 	if x, ok := n.c.ast.ABI.Types[n.kind]; ok {
@@ -2441,6 +2449,10 @@ func IsSignedInteger(t Type) bool {
 //
 //	[0] 6.3.1.8 Usual arithmetic conversions
 func UsualArithmeticConversions(a, b Type) (r Type) {
+	if v := vectorOperand(a, b); v != nil {
+		return v
+	}
+
 	r = usualArithmeticConversions(a, b)
 	if complexKinds[r.Kind()] || !complexKinds[a.Kind()] && !complexKinds[b.Kind()] {
 		return r
@@ -2705,6 +2717,10 @@ func integerPromotionKind(k Kind) Kind {
 // are called the integer promotions. All other types are unchanged by the
 // integer promotions.
 func IntegerPromotion(t Type) Type {
+	if isVectorType(t) {
+		return t
+	}
+
 	switch t.Kind() {
 	case Bool, Char, SChar, UChar, Short, UShort:
 		return t.(*PredefinedType).c.ast.kinds[Int]

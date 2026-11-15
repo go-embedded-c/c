@@ -115,11 +115,10 @@ func TestGeneratePredefinedMatchesCommitted(t *testing.T) {
 }
 
 // The corpora: how many files cc/v4 takes. A front-end bump must not lower
-// the floors. gcc 15.2.0 torture: 1879 / 1890. Eight of the refusals are
+// the floors. gcc 15.2.0 torture: 1881 / 1890. Eight of the refusals are
 // wasi-libc's own #error (signal.h, setjmp.h, sys/mman.h), which clang
 // refuses too; pr117432.c uses C23 `f(...)` with no named parameter, which
-// cc/v4 does not take; pr23135.c and simd-1.c put a mode on a vector type,
-// not implemented. The refused files are logged, the first twenty.
+// cc/v4 does not take. The refused files are logged, the first twenty.
 func corpusRate(t *testing.T, env string, lvl cparse.Level, floor int) {
 	dir := oracletest.Dir(t, env)
 	tc := oracletest.Require(t)
@@ -157,8 +156,9 @@ func TestCorpusCTestsuite(t *testing.T) { corpusRate(t, "CORACLE_CTESTSUITE", cp
 // 1881 while cc/v4 ignored the mode and packed attributes, with the wrong
 // sizes; 1867 with mode refused (2026-11-14); 1866 with both implemented
 // (2026-11-15), a packed bit-field refused; 1879 with the Itanium bit-field
-// layout, packed bit-fields included (go-embedded-c/c#29).
-func TestCorpusGCCTorture(t *testing.T) { corpusRate(t, "CORACLE_GCC_TORTURE", cparse.Check, 1879) }
+// layout, packed bit-fields included (go-embedded-c/c#29); 1881 with a mode
+// on a vector type (pr23135.c, simd-1.c).
+func TestCorpusGCCTorture(t *testing.T) { corpusRate(t, "CORACLE_GCC_TORTURE", cparse.Check, 1881) }
 
 // FuzzSource: the front end is fed untrusted text. It may refuse anything;
 // it must not panic.
@@ -362,6 +362,40 @@ _Static_assert(sizeof(2.0iL) == 32 && sizeof(2.0i) == 16 && sizeof(2.0fi) == 8, 
 // TestComplexTyping checks complexTypingSource.
 func TestComplexTyping(t *testing.T) {
 	if err := front(t).Source("c.c", []byte(complexTypingSource), cparse.Check); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// vectorTypingSource: GNU vectors keep their type through the operators,
+// a comparison is a vector of integers as wide, an element has the
+// element's type, and a vector is aligned on its size. clang 23.1.4
+// (wasm32-wasip1, -std=gnu17 -fsyntax-only) holds every assertion,
+// measured 2026-11-15; cc/v4 typed s + 2, s << 2 and 1 << s as int, s[1] as the
+// whole vector, s < s as int, aligned a vector on its element, counted the
+// initialisers of a vector declared with the attribute before the type in
+// bytes, and the mode patch refused a mode on a vector, which applies to
+// its element.
+const vectorTypingSource = `typedef short v8hi __attribute__((vector_size(16)));
+typedef int v8si __attribute__((vector_size(32)));
+typedef double v2df __attribute__((vector_size(16)));
+typedef char v2qi __attribute__((vector_size(2)));
+typedef short __attribute__((vector_size(16))) v8pre;
+v8hi s = {1, 2, 3, 4, 5, 6, 7, 8}; v2df d = {1, 2};
+v8pre pre = {1, 2, 3, 4, 5, 6, 7, 8};
+struct m { char c; v8hi v; };
+_Static_assert(sizeof(s + 2) == 16 && sizeof(2 * s) == 16 && sizeof(s << 2) == 16 && sizeof(1 << s) == 16 && sizeof(-s) == 16 && sizeof(~s) == 16, "operators keep the vector");
+_Static_assert(sizeof(s < s) == 16 && sizeof(d == d) == 16 && sizeof((d < d)[0]) == 8 && sizeof((s != s)[1]) == 2, "comparisons");
+_Static_assert(sizeof(s[1]) == 2 && sizeof(d[0]) == 8, "an element");
+_Static_assert(_Alignof(v8hi) == 16 && _Alignof(v8si) == 32 && _Alignof(v2qi) == 2 && __builtin_offsetof(struct m, v) == 16, "alignment");
+typedef int __attribute__((mode(SI))) __attribute__((vector_size(16))) vsi;
+typedef int __attribute__((vector_size(16))) __attribute__((mode(QI))) vqi;
+vsi ma; vqi mb;
+_Static_assert(sizeof(vsi) == 16 && sizeof(ma[0]) == 4 && sizeof(vqi) == 16 && sizeof(mb[0]) == 1 && _Alignof(vqi) == 16, "mode on a vector");
+`
+
+// TestVectorTyping checks vectorTypingSource.
+func TestVectorTyping(t *testing.T) {
+	if err := front(t).Source("v.c", []byte(vectorTypingSource), cparse.Check); err != nil {
 		t.Fatal(err)
 	}
 }
