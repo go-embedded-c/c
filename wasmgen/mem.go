@@ -280,9 +280,6 @@ func (m *module) staticMember(x *cc.PostfixExpression) (uint32, int64, error) {
 	if hasVLA(base) {
 		return 0, 0, unsupported(x, "member of a structure with a variable-length array")
 	}
-	if !m.layoutOK(base) {
-		return 0, 0, unsupported(x, layoutRefusal)
-	}
 	var sym uint32
 	var addend int64
 	var err error
@@ -515,9 +512,6 @@ func (g *fgen) complit(x *cc.PostfixExpression) error {
 	if !storable(t) {
 		return unsupported(x, "compound literal of type "+typeName(t))
 	}
-	if !g.m.layoutOK(t) {
-		return unsupported(x, layoutRefusal)
-	}
 	if t.Size() > maxObject {
 		return unsupported(x, "compound literal larger than the limit")
 	}
@@ -553,9 +547,6 @@ func (m *module) staticComplit(x *cc.PostfixExpression) (uint32, error) {
 	if !storable(t) {
 		return 0, unsupported(x, "compound literal of type "+typeName(t))
 	}
-	if !m.layoutOK(t) {
-		return 0, unsupported(x, layoutRefusal)
-	}
 	if t.Size() > maxObject {
 		return 0, unsupported(x, "compound literal larger than the limit")
 	}
@@ -586,9 +577,6 @@ func (g *fgen) memberAddr(x *cc.PostfixExpression) error {
 	}
 	if hasVLA(base) {
 		return unsupported(x, "member of a structure with a variable-length array")
-	}
-	if !g.m.layoutOK(base) {
-		return unsupported(x, layoutRefusal)
 	}
 	var err error
 	if x.Case == cc.PostfixExpressionSelect {
@@ -795,9 +783,6 @@ func (g *fgen) memoryLocal(d *cc.Declarator, id *cc.InitDeclarator) error {
 	}
 	if !storable(t) {
 		return unsupported(d, "local of type "+typeName(t))
-	}
-	if !g.m.layoutOK(t) {
-		return unsupported(d, layoutRefusal)
 	}
 	if size > maxObject {
 		return unsupported(d, "local larger than the limit")

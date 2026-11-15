@@ -58,7 +58,9 @@ func TestUnsupported(t *testing.T) {
 		{"int g(int n) { __builtin_va_start(n, n); return 0; } int main(void) { return g(1); }", "va_start outside a variadic function"},
 		{"struct S { long long a: 24; }; int main(void) { struct S s; s.a = 1; return s.a; }", "bit-field of a type wider than int, narrower than int"},
 		{"int x; struct S { int a: 3; } s = {x}; int main(void) { return 0; }", "non-constant bit-field initializer"},
-		{"struct S { unsigned long long f:44; _Bool g:1; short h; }; int main(void) { struct S s; s.h = 1; return s.h; }", "bit-field layout that cc/v4 computes otherwise than clang"},
+		// A packed bit-field of 64 bits from bit 3 spans 9 bytes, more than
+		// any wasm access.
+		{"struct __attribute__((packed)) S { char c:3; unsigned long long x:64; }; int main(void) { struct S s; s.x = 1; return (int)s.x; }", "bit-field in a storage unit of odd size"},
 		{"int f(); int g(int (*p)()) { return p(1); } int main(void) { return 0; }", "call through a pointer to a function without a prototype"},
 		{"int f(int n) { int a[n]; return 0; } int main(void) { return f(2); }", "variable-length array"},
 		{"int main(void) { return __builtin_classify_type(1); }", "builtin __builtin_classify_type"},
@@ -349,6 +351,7 @@ func TestAgainstClang(t *testing.T) {
 		asmProgram,
 		modeProgram,
 		packedProgram,
+		bitfieldLayoutProgram,
 		// long double (binary128): storage, parameters, results, every
 		// operation, comparison and conversion, varargs
 		quadProgram,
@@ -462,6 +465,45 @@ int main(void) {
 // packedProgram: packed structs and members at run time: the bytes of each
 // layout, misaligned loads and stores of every width, an array of packed
 // structs, a packed struct copied and passed by value, a union.
+// bitfieldLayoutProgram: the Itanium bit-field layout (go-embedded-c/c#29),
+// packed or not. For each struct: its size, alignment and the offsets of its
+// ordinary members, then its bytes after each bit-field alone is set to all
+// ones, then the value read back from each. Nothing in it is a constant
+// taken from clang: the comparison is the whole output.
+const bitfieldLayoutProgram = `#include <stdio.h>
+#include <stddef.h>
+#include <string.h>
+static void dump(const void *v, size_t n) { const unsigned char *b = v; size_t i; for (i = 0; i < n; i++) printf("%02x", b[i]); printf(" "); }
+#define SET(T, f) do { T s; memset(&s, 0, sizeof s); s.f = -1; dump(&s, sizeof s); printf("%lld|", (long long)s.f); } while (0)
+#define HEAD(T) printf("\n%s %zu %zu: ", #T, sizeof(T), _Alignof(T))
+struct s29 { unsigned long long f:44; _Bool g:1; short h; };
+struct cross { char a:7; char b:3; int c:30; int d:4; long long e:40; long long g:33; };
+struct zero { char a:3; int :0; char b:2; long long :0; char c; };
+struct anon { char a; int :4; char b; };
+struct mixed { char c; int x:5; short s; unsigned y:20; char t; };
+struct __attribute__((packed)) pk { int g:31; int h:6; char c; };
+struct pk2 { char a; unsigned long w:32 __attribute__((packed)); char b; };
+struct __attribute__((packed)) pk3 { char a:3; long long l:60; short s:9; int :0; char z; };
+struct pk4 { char c; struct __attribute__((packed)) { int a:13; int b:13; } in; char d; };
+union u { char c; int x:3; long long y:33; };
+union __attribute__((packed)) up { char c; int x:20; };
+int main(void) {
+	HEAD(struct s29); printf("%zu ", offsetof(struct s29, h)); SET(struct s29, f); SET(struct s29, g); SET(struct s29, h);
+	HEAD(struct cross); SET(struct cross, a); SET(struct cross, b); SET(struct cross, c); SET(struct cross, d); SET(struct cross, e); SET(struct cross, g);
+	HEAD(struct zero); printf("%zu ", offsetof(struct zero, c)); SET(struct zero, a); SET(struct zero, b); SET(struct zero, c);
+	HEAD(struct anon); printf("%zu ", offsetof(struct anon, b)); SET(struct anon, a); SET(struct anon, b);
+	HEAD(struct mixed); printf("%zu %zu ", offsetof(struct mixed, s), offsetof(struct mixed, t)); SET(struct mixed, x); SET(struct mixed, y); SET(struct mixed, s);
+	HEAD(struct pk); printf("%zu ", offsetof(struct pk, c)); SET(struct pk, g); SET(struct pk, h); SET(struct pk, c);
+	HEAD(struct pk2); printf("%zu ", offsetof(struct pk2, b)); SET(struct pk2, w); SET(struct pk2, b);
+	HEAD(struct pk3); printf("%zu ", offsetof(struct pk3, z)); SET(struct pk3, a); SET(struct pk3, l); SET(struct pk3, s); SET(struct pk3, z);
+	HEAD(struct pk4); printf("%zu %zu ", offsetof(struct pk4, in), offsetof(struct pk4, d)); SET(struct pk4, in.a); SET(struct pk4, in.b);
+	HEAD(union u); SET(union u, x); SET(union u, y);
+	HEAD(union up); SET(union up, x);
+	{ struct pk p = { -5, 17, 'q' }; struct pk3 q = { 2, -3LL, 100, 'z' }; printf("\n%d %d %c %d %lld %d %c\n", p.g, p.h, p.c, q.a, (long long)q.l, q.s, q.z); }
+	return 0;
+}
+`
+
 const packedProgram = `#include <stdio.h>
 #include <string.h>
 struct __attribute__((packed)) p { char c; long long l; short s; int i; double d; };

@@ -325,6 +325,18 @@ var patches = []filePatch{
 		Old:  "func (n *Field) alignment() int { return max(n.Type().Align(), n.align) }\n",
 		New:  "func (n *Field) alignment() int {\n\tif n.packed {\n\t\treturn max(1, n.align)\n\t}\n\n\treturn max(n.Type().Align(), n.align)\n}\n",
 	},
+	{
+		File: "check.go",
+		Why:  "bit-fields were laid out in groups, not by the Itanium rule gcc and clang follow: `struct { unsigned long long f:44; _Bool g:1; short h; }` had h at 8 and size 16, clang 6 and 8 (bitfield.go, go-embedded-c/c#29)",
+		Old:  "\t\tn.checkStruct(c, a, fields)\n",
+		New:  "\t\tif c.itaniumLayout() && hasBitfield(fields) {\n\t\t\tc.layoutStruct(a, fields)\n\t\t} else {\n\t\t\tn.checkStruct(c, a, fields)\n\t\t}\n",
+	},
+	{
+		File: "check.go",
+		Why:  "and in unions, where an unnamed bit-field aligned the union",
+		Old:  "\t\tn.checkUnion(c, a, fields)\n",
+		New:  "\t\tif c.itaniumLayout() && hasBitfield(fields) {\n\t\t\tc.layoutUnion(a, fields)\n\t\t} else {\n\t\t\tn.checkUnion(c, a, fields)\n\t\t}\n",
+	},
 }
 
 // packedGo is added to the package: the packed attribute (go-embedded-c/c#42).
@@ -333,8 +345,8 @@ const packedGo = `package cc
 // __attribute__((packed)) on the definition of a struct or union is packed on
 // each member; a packed member has alignment 1 unless an aligned attribute
 // asks more (GCC manual, Common Attributes, packed). cc/v4 ignored it
-// (go-embedded-c patch). Bit-fields of a packed struct, a packed bit-field
-// and a packed enum are refused until implemented.
+// (go-embedded-c patch). A packed bit-field is laid out by bitfield.go; a
+// packed enum is refused until implemented.
 
 // checkPacked records the packed attribute n in attr.
 func (c *ctx) checkPacked(n *AttributeValue, attr *Attributes) {
@@ -387,13 +399,177 @@ func (c *ctx) packMember(l []*AttributeValue, f *Field) {
 	c.packField(l[0], f)
 }
 
+// packField packs f. A packed bit-field is laid out by layoutStruct, on the
+// targets that follow the Itanium rule; elsewhere it is refused.
 func (c *ctx) packField(n *AttributeValue, f *Field) {
-	if f.IsBitfield() {
-		c.errors.add(errorf("%v: attribute packed on a bit-field is not supported", n.Position()))
+	if f.IsBitfield() && !c.itaniumLayout() {
+		c.errors.add(errorf("%v: attribute packed on a bit-field is not supported for this target", n.Position()))
 		return
 	}
 
 	f.packed = true
+}
+`
+
+// bitfieldGo is added to the package: bit-fields laid out by the Itanium rule
+// (go-embedded-c/c#29).
+const bitfieldGo = `package cc
+
+// cc/v4 laid bit-fields out in "groups" sized by the declared type
+// (fieldAllocator), which is not the rule gcc and clang follow for every
+// target but Microsoft's, the Itanium C++ ABI's for C (clang
+// RecordLayoutBuilder, ItaniumRecordLayoutBuilder::LayoutBitField):
+//
+//   - a bit-field goes at the next free bit, unless it would straddle a
+//     boundary of its declared type's alignment, and then at that boundary;
+//     a packed bit-field goes at the next free bit (GCC manual, packed: "one
+//     bit for a bit-field");
+//   - a zero-width bit-field moves the next member to its type's boundary,
+//     packed or not;
+//   - an unnamed bit-field does not align the struct;
+//   - the next ordinary member goes at the first byte after the bits used,
+//     at its alignment.
+//
+// struct { unsigned long long f:44; _Bool g:1; short h; } has h at 6 and size
+// 8 under clang, at 8 and 16 under the group allocator (go-embedded-c patch).
+
+// itaniumLayout reports whether the target lays bit-fields out by the
+// Itanium rule: little-endian, not Microsoft's. The other targets keep
+// cc/v4's allocator.
+func (c *ctx) itaniumLayout() bool {
+	return !c.ast.ABI.isBigEndian() && c.ast.ABI.goos != "windows"
+}
+
+func hasBitfield(fields []*Field) bool {
+	for _, f := range fields {
+		if f.IsBitfield() {
+			return true
+		}
+	}
+	return false
+}
+
+// bitfieldAlign is the alignment that bounds a bit-field and that a named one
+// gives the struct: its declared type's, 1 when packed.
+func bitfieldAlign(f *Field) int64 {
+	if f.packed {
+		return 1
+	}
+
+	return int64(max(f.Type().Align(), 1))
+}
+
+// placeBitfield records that f's value is at bit of the struct. Its storage
+// unit, which a read loads and a write stores back whole, is the aligned unit
+// of its declared type, inside which the rule keeps it; for a packed
+// bit-field, which may straddle any boundary, the bytes it spans rounded up
+// to 1, 2, 4 or 8 (more is not a unit, and is refused where it is accessed).
+func placeBitfield(f *Field, bit int64) {
+	w := f.ValueBits()
+	var start, unit int64
+	switch {
+	case f.packed:
+		start = bit / 8
+		unit = 1
+		for unit*8 < bit-start*8+w {
+			unit *= 2
+		}
+	default:
+		unit = bitfieldAlign(f)
+		start = bit / (unit * 8) * unit
+	}
+	f.offsetBytes = start
+	f.outerGroupOffsetBytes = start
+	f.offsetBits = int(bit - start*8)
+	f.accessBytes = unit
+	f.groupSize = int(unit)
+	f.inOverlapGroup = false
+	f.mask = 0
+	if w > 0 && w <= 64 {
+		f.mask = (^uint64(0) >> (64 - w)) << f.offsetBits
+	}
+}
+
+// layoutStruct lays out the members of a struct with bit-fields by the
+// Itanium rule, and leaves in a the end of the last member, in bytes, and the
+// struct's alignment.
+func (c *ctx) layoutStruct(a *fieldAllocator, fields []*Field) {
+	var bit int64 // the next free bit
+	align := int64(1)
+	for i, f := range fields {
+		t := f.Type()
+		if !f.IsBitfield() {
+			if (t.IsIncomplete() || t.Size() == 0) && t.Kind() == Array && i == len(fields)-1 {
+				f.isFlexibleArrayMember = true
+				if x, ok := t.(*ArrayType); ok {
+					f.isFlexibleArrayMember = !x.IsVLA()
+				}
+			}
+			sz := t.Size()
+			if f.isFlexibleArrayMember || isEmpty(t) || sz < 0 {
+				sz = 0
+			}
+			fa := int64(f.alignment())
+			off := roundup((bit+7)/8, fa)
+			f.offsetBytes = off
+			f.outerGroupOffsetBytes = off
+			f.accessBytes = sz
+			f.groupSize = int(sz)
+			bit = (off + sz) * 8
+			align = max(align, fa)
+			continue
+		}
+
+		w := f.ValueBits()
+		if w == 0 {
+			// Packed or not.
+			bit = roundup(bit, int64(max(t.Align(), 1))*8)
+			placeBitfield(f, bit)
+			continue
+		}
+
+		ba := bitfieldAlign(f)
+		if unit := ba * 8; !f.packed && bit/unit != (bit+w-1)/unit {
+			bit = roundup(bit, unit)
+		}
+		placeBitfield(f, bit)
+		bit += w
+		if f.Name() != "" {
+			align = max(align, ba)
+		}
+	}
+	a.brkBytes = (bit + 7) / 8
+	a.align = int(align)
+}
+
+// layoutUnion lays out the members of a union with bit-fields: each at
+// offset 0; a bit-field takes the bytes of its width, and only a named one
+// aligns the union.
+func (c *ctx) layoutUnion(a *fieldAllocator, fields []*Field) {
+	var size int64
+	align := int64(1)
+	for _, f := range fields {
+		t := f.Type()
+		if !f.IsBitfield() {
+			sz := t.Size()
+			if isEmpty(t) || sz < 0 {
+				sz = 0
+			}
+			f.offsetBytes, f.outerGroupOffsetBytes, f.accessBytes, f.groupSize = 0, 0, sz, int(sz)
+			size = max(size, sz)
+			align = max(align, int64(f.alignment()))
+			continue
+		}
+
+		placeBitfield(f, 0)
+		w := f.ValueBits()
+		size = max(size, (w+7)/8)
+		if f.Name() != "" && w != 0 {
+			align = max(align, bitfieldAlign(f))
+		}
+	}
+	a.brkBytes = size
+	a.align = int(align)
 }
 `
 
@@ -669,8 +845,8 @@ func nonNilFields(fs []*Field) []*Field {
 const header = "// Code generated by vendorcc from modernc.org/cc/v4 " + Version + "; DO NOT EDIT.\n// The patches are listed in internal/cmd/vendorcc/generate.go.\n\n"
 
 // Generate writes internal/cc into out (replaced): the non-test Go files of
-// the cc/v4 module directory src, patched, plus budget.go, mode.go, packed.go
-// and the licence.
+// the cc/v4 module directory src, patched, plus budget.go, mode.go, packed.go,
+// bitfield.go and the licence.
 func Generate(out, src string) error {
 	if base := filepath.Base(src); base != "v4@"+Version {
 		return fmt.Errorf("vendorcc: %s is not modernc.org/cc/v4@%s", src, Version)
@@ -686,7 +862,7 @@ func Generate(out, src string) error {
 	if err != nil {
 		return err
 	}
-	files := map[string]string{"budget.go": budgetGo, "mode.go": modeGo, "packed.go": packedGo}
+	files := map[string]string{"budget.go": budgetGo, "mode.go": modeGo, "packed.go": packedGo, "bitfield.go": bitfieldGo}
 	for _, e := range entries {
 		n := e.Name()
 		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {

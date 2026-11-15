@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float`, `double` and `long double` (binary128), bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), `asm` statements with an empty template, and the `mode` and `packed` attributes. 1555 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float`, `double` and `long double` (binary128), bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), `asm` statements with an empty template, the `mode` and `packed` attributes, and clang's bit-field layout. 1567 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -281,11 +281,19 @@ W6 adds bit-fields:
 - Initialisers set the bits, in the data for a static object and in the
   frame for a local one. The value of an assignment is the stored value,
   truncated to the width.
-- cc/v4 lays bit-fields out by its own rule, which is not clang's
-  (Itanium). For example, `struct { unsigned long long f:44; _Bool g:1;
-  short h; }` has `h` at 6 under clang and at 8 under cc/v4. The
-  generator computes clang's layout of every structure with bit-fields
-  and refuses one that cc/v4 lays out otherwise.
+- cc/v4 laid bit-fields out by its own rule, which is not clang's. For
+  example, `struct { unsigned long long f:44; _Bool g:1; short h; }` had
+  `h` at 8 and size 16, where clang has 6 and 8. The front end now uses
+  the rule of the Itanium ABI, which gcc and clang follow on every target
+  but Microsoft's (go-embedded-c/c#29). Its constant `sizeof`, `_Alignof`
+  and `offsetof` agree with clang's.
+  - A bit-field goes at the next free bit, unless it would straddle a
+    boundary of its type's alignment.
+  - A zero-width bit-field moves the next member to its type's boundary.
+  - An unnamed bit-field does not align the structure.
+  - A packed bit-field goes at the next free bit. Its storage unit is the
+    bytes it spans, rounded to 1, 2, 4 or 8, and may be misaligned. One
+    that spans 9 bytes is refused.
 - A bit-field of a type wider than `int` but narrower than 32 bits is
   refused. cc/v4 types it `int`, while clang keeps its declared type.
 
@@ -321,8 +329,9 @@ front end (patches in `internal/cmd/vendorcc`) now implements them:
   (`sizeof` 24 where clang gives 11).
 
 Both are refused where nothing applies them: in a type name, before a member,
-on an `enum`. They are also refused on what is not implemented yet: a packed
-bit-field, `TI`, and a mode on a vector type (go-embedded-c/c#42).
+on an `enum`. They are also refused on what is not implemented yet: `TI`,
+and a mode on a vector type (go-embedded-c/c#42). Packed bit-fields follow
+the bit-field rule above.
 
 The same patches fix a parser defect that dropped the middle values of an
 attribute list of three or more, and panicked on a `,` after a refused first
@@ -448,10 +457,10 @@ does for structures, is the fifth):
   misaligning a `long long` in the varargs buffer, on the side that is
   ours.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-15, with the `mode` and `packed` attributes, 1555 files ran the
-  same as under clang. Eight were gained, and five were lost to the refusal
-  of packed bit-fields: those five had agreed with clang only by chance
-  (1552 with the empty-template `asm` statements, 1502 with
+  2026-11-15, with the Itanium bit-field layout, 1567 files ran the same as
+  under clang, 12 gained and none lost (1555 with the `mode` and `packed`
+  attributes, eight gained and five lost to the then refusal of packed
+  bit-fields, 1552 with the empty-template `asm` statements, 1502 with
   `long double`, 1477 with static member addresses and the floating-point builtins in
   static initializers, 1472 with the floating-point and byte builtins, 1440 with the computing builtins,
   1404 with function pointers, 1381 after W7, 1350 with compound literals,
