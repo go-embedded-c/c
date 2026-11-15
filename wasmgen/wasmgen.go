@@ -61,6 +61,11 @@ type module struct {
 	// Static locals by declarator, and the names their symbols took.
 	locals     map[*cc.Declarator]*dataSym
 	localNames map[string]bool
+	// Label addresses (labeladdr.go): the value of &&label, by function and
+	// label, and the labels whose address each function takes, in order.
+	fn          string // the function being compiled
+	labelIDs    map[labelKey]int64
+	takenLabels map[string][]string
 	// File-scope compound literals.
 	complits map[*cc.PostfixExpression]*dataSym
 	// String literal symbols by contents.

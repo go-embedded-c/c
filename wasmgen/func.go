@@ -49,6 +49,8 @@ type fgen struct {
 	continues []*block
 	cases     map[*cc.LabeledStatement]*block
 	labels    map[string]*block // goto targets, by name
+	dispatch  *block            // the target of every goto *, when there is one (labeladdr.go)
+	target    uint32            // the local holding the address a goto * jumps to
 
 	// The linear-stack frame (mem.go), when the function needs one.
 	frame     bool
@@ -116,6 +118,7 @@ func (m *module) function(fd *cc.FunctionDefinition) error {
 	if !ok || f == nil {
 		return unsupported(d, "function definition of type "+typeName(d.Type()))
 	}
+	m.fn = d.Name()
 	g := &fgen{m: m, fn: f.pos, name: d.Name(), complits: map[*cc.PostfixExpression]int64{}, vars: map[*cc.Declarator]uint32{}, void: f.result == nil, sig: f.sig,
 		cases: map[*cc.LabeledStatement]*block{}, labels: map[string]*block{}, slots: map[*cc.Declarator]int64{}, refs: map[*cc.Declarator]uint32{}}
 	if !g.void {
@@ -202,6 +205,7 @@ func (m *module) function(fd *cc.FunctionDefinition) error {
 	// Falling off the end: main returns 0 (C11 5.1.2.2.3); for another
 	// function the value is unusable, and any value will do.
 	g.ret()
+	g.dispatchBlocks()
 	if g.frame {
 		// The frame size is known now: put the prologue before the entry
 		// block's code, moving its relocations and call sites.
@@ -430,8 +434,10 @@ func (g *fgen) jumpStatement(j *cc.JumpStatement) error {
 		g.endJump(g.labelBlock(j.Token2.SrcStr()))
 		g.dead()
 		return nil
+	case cc.JumpStatementGotoExpr:
+		return g.gotoExpr(j)
 	}
-	return unsupported(j, "computed goto")
+	return unsupported(j, "jump "+j.Case.String())
 }
 
 func (g *fgen) selection(s *cc.SelectionStatement) error {

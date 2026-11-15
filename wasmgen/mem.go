@@ -122,6 +122,12 @@ func (m *module) staticValue(e cc.ExpressionNode, t cc.Type, seg *wasm.Segment, 
 			return nil
 		}
 	}
+	if v, ok := m.labelConst(e); ok {
+		// &&label, or the difference of two: a number (labeladdr.go).
+		b := binary.LittleEndian.AppendUint64(nil, uint64(convertConst(v, s)))
+		copy(seg.Init[off:], b[:s.bits/8])
+		return nil
+	}
 	if v, ok := intValue(e); ok {
 		b := binary.LittleEndian.AppendUint64(nil, uint64(convertConst(v, s)))
 		copy(seg.Init[off:], b[:s.bits/8])
