@@ -537,6 +537,24 @@ func (g *fgen) addr(e cc.ExpressionNode) error {
 			return g.memberAddr(x)
 		}
 		if x.Case == cc.PostfixExpressionIndex {
+			if v, i := x.PostfixExpression, x.ExpressionList; isVec(v.Type()) || isVec(i.Type()) {
+				// v[i] designates element i of the vector v (vec.go).
+				if !isVec(v.Type()) {
+					v, i = i, v
+				}
+				if err := g.aggAddr(v); err != nil {
+					return err
+				}
+				_, size, _, ok := vecElem(v.Type())
+				if !ok {
+					return unsupported(x, "vector of "+typeName(v.Type()))
+				}
+				if err := g.offset(i, size); err != nil {
+					return err
+				}
+				g.op(opI32Add)
+				return nil
+			}
 			// E1[E2] is *(E1 + E2); either operand may be the pointer.
 			p, i := x.PostfixExpression, x.ExpressionList
 			if !isPtrOrArray(p.Type()) {
@@ -666,6 +684,11 @@ func (g *fgen) aggAddr(e cc.ExpressionNode) error {
 	}
 	if isLDCx(e.Type()) {
 		if done, err := g.ldcxComputed(e); done {
+			return err
+		}
+	}
+	if isVec(e.Type()) {
+		if done, err := g.vecComputed(e); done {
 			return err
 		}
 	}

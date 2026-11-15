@@ -47,8 +47,7 @@ func TestUnsupported(t *testing.T) {
 		{"int n; long double d = n; int main(void) { return 0; }", "non-constant initializer"},
 		{"int main(void) { long double d = 1; int k = 3; k %= d; return k; }", "compound assignment of a scalar by a long double"},
 		{"int main(void) { return (int)__builtin_nanl(\"0x1g\"); }", "__builtin_nanl of a string clang does not read as a number"},
-		{"typedef float v4 __attribute__((vector_size(16))); float f(v4 *p) { v4 t = *p; return 0; } int main(void) { return 0; }", "local of type v4"},
-		{"typedef int v4 __attribute__((vector_size(16))); int main(void) { v4 a, b; return 0; }", "local of type v4"},
+		{"typedef float v4 __attribute__((vector_size(16))); v4 f(v4 a) { return a + 1.0L; } int main(void) { return 0; }", "vector operand of type long double"},
 		{"void f(int n) { struct S { int i[n]; int k; } s; } int main(void) { f(1); return 0; }", "local of type struct S {i array of int; k int}"},
 		{"int f(int n, void *p) { struct S { int i[n]; int k; } *s = p; return s->k; } int main(void) { return 0; }", "local of type pointer to struct S"},
 		{"int g(int n) { __builtin_va_start(n, n); return 0; } int main(void) { return g(1); }", "va_start outside a variadic function"},
@@ -393,6 +392,7 @@ func TestAgainstClang(t *testing.T) {
 		complexProgram,
 		intComplexProgram,
 		ldComplexProgram,
+		vectorProgram,
 		// __func__ (C11 6.4.2.2): each function's own, printed, indexed, its
 		// size, its address stable across calls
 		"#include <stdio.h>\nstatic const char *who(void) { return __func__; }\nint main(void) { printf(\"%s %s %c %zu %d\\n\", __func__, who(), __func__[1], sizeof __func__, who() == who()); return 0; }",
@@ -796,6 +796,68 @@ int main(void) {
 	printf("%a %a %d\n", __real__ d, __imag__ d, (int)__real__ a);
 	c = 1.0 + 2.0i;
 	printf("%d %d %d\n", __real__ c, __imag__ c, !(a - a));
+	return 0;
+}
+`
+
+// vectorProgram: GNU vectors of int, unsigned short, signed char, long
+// long, float and double. Every operator with two vectors and with a
+// scalar on either side, signed and unsigned division and shifts (no
+// promotion: the element wraps), the unary operators (-0.0 too), the
+// comparisons (-1 or 0, a NaN unordered), elements as values and lvalues,
+// op=, casts between vectors and from and to a scalar, parameters and results, a
+// static and a local initialiser, a compound literal, a member, ?:.
+const vectorProgram = `#include <stdio.h>
+typedef int v4si __attribute__((vector_size(16)));
+typedef unsigned short v4hu __attribute__((vector_size(8)));
+typedef signed char v8qi __attribute__((vector_size(8)));
+typedef long long v2di __attribute__((vector_size(16)));
+typedef float v4sf __attribute__((vector_size(16)));
+typedef double v2df __attribute__((vector_size(16)));
+typedef int v2si __attribute__((vector_size(8)));
+typedef char v4qi __attribute__((vector_size(4)));
+static v4si gi = {150, -100, 7, 200};
+static v2df gd = {1.5};
+struct S { char c; v4si v; };
+static void pi(const char *n, v4si v) { printf("%s %d %d %d %d\n", n, v[0], v[1], v[2], v[3]); }
+static void phu(const char *n, v4hu v) { printf("%s %u %u %u %u\n", n, v[0], v[1], v[2], v[3]); }
+static void pqi(const char *n, v8qi v) { int i; printf("%s", n); for (i = 0; i < 8; i++) printf(" %d", v[i]); printf("\n"); }
+static void psf(const char *n, v4sf v) { printf("%s %a %a %a %a\n", n, v[0], v[1], v[2], v[3]); }
+static void pdf(const char *n, v2df v) { printf("%s %a %a\n", n, v[0], v[1]); }
+static void pdi(const char *n, v2di v) { printf("%s %lld %lld\n", n, v[0], v[1]); }
+static v4si twice(v4si v) { return v + v; }
+int main(void) {
+	v4si j = {10, 13, -20, 30}, k;
+	v4hu h = {65535, 1, 300, 40000}, h2 = {2, 3, 4, 5};
+	v8qi q = {127, -128, 1, 2, 3, 4, 5, -6};
+	v2di l = {1LL << 40, -3};
+	v4sf f = {1.5f, -0.0f, 3.0f, 0.0f};
+	v2df d = {0.0 / 0.0, 2.0};
+	struct S s;
+	int i;
+	pi("add", gi + j); pi("sub", gi - j); pi("mul", gi * j); pi("div", gi / j); pi("rem", gi % j);
+	pi("and", gi & j); pi("or", gi | j); pi("xor", gi ^ j); pi("shl", j << 2); pi("shr", gi >> 1);
+	pi("scl", 2 - j); pi("scr", j - 2); pi("shv", 1 << (v4si){0, 1, 2, 3});
+	pi("neg", -gi); pi("cpl", ~gi); pi("pos", +gi);
+	pi("lt", gi < j); pi("eq", gi == gi); pi("ne", j != 13); pi("ge", 7 >= gi);
+	phu("hadd", h + h2); phu("hmul", h * h2); phu("hdiv", h / h2); phu("hshr", h >> h2); phu("hneg", -h);
+	phu("hlt", (v4hu)(h < h2)); phu("hshl", h << 1);
+	pqi("qadd", q + 1); pqi("qmul", q * q); pqi("qdiv", q / 3); pqi("qshr", q >> 1); pqi("qeq", q == 3);
+	pdi("ladd", l + l); pdi("lmul", l * 3); pdi("lshr", l >> 4); pdi("llt", l < 0);
+	psf("fadd", f + 1.0f); psf("fmul", f * f); psf("fdiv", 1.0f / f); psf("fneg", -f); psf("fpos", +f);
+	pi("flt", f < 1.0f); pi("feq", f == 0.0f);
+	pdf("dadd", d + gd); pdf("dneg", -d); pdi("deq", d == d); pdi("dne", d != d); pdi("dlt", d < 3.0);
+	k = gi; k[2] = 99; k[0] += 5; pi("elem", k);
+	k += j; k *= 2; k -= 1; k <<= 1; k >>= 2; k &= 255; k |= 1; k ^= 3; k /= 3; k %= 5; pi("op=", k);
+	f *= 2.0f; f /= 4.0f; psf("fop=", f);
+	pi("cast", (v4si)f); psf("cast2", (v4sf)(v4si){0x3f800000, 0x40000000, 0, -1});
+	pdi("scast", (v2di)(v4si){1, 2, 3, 4}); pqi("lcast", (v8qi)0x0102030405060708LL);
+	pi("call", twice(j)); pi("nest", twice(twice(j) - j) * 2);
+	s.c = 1; s.v = j; s.v[3] = 7; pi("member", s.v);
+	for (i = 0; i < 2; i++) pi("cond", i ? j : gi);
+	pi("lit", (v4si){1, 2} + (v4si){3});
+	printf("%d %d %zu %zu\n", (gi + j)[1], (gi == gi)[3], sizeof(v8qi), _Alignof(v2df));
+	printf("%llx %llx %d\n", (unsigned long long)q, (long long)(v2si){5, 0x3ff00000}, (int)(v4qi){1, 2, 3, 4});
 	return 0;
 }
 `

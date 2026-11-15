@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals and `__func__`, `main(argc, argv)`, `float`, `double` and `long double` (binary128), `float`, `double`, `long double` and GNU integer `_Complex`, bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), `asm` statements with an empty template, the `mode` and `packed` attributes, clang's bit-field layout and promotion, statement expressions, labels as values, and irreducible loops. 1617 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals and `__func__`, `main(argc, argv)`, `float`, `double` and `long double` (binary128), `float`, `double`, `long double` and GNU integer `_Complex`, bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), `asm` statements with an empty template, the `mode` and `packed` attributes, clang's bit-field layout and promotion, statement expressions, labels as values, irreducible loops, and GNU vectors. 1639 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -268,8 +268,9 @@ is the one clang emits at `-O0` (checked with `llvm-objdump`):
   zero, so NaN is true.
 - Negation is `f.neg`, so `-(+0.0)` is `-0.0`.
 - A floating literal is rounded once, from its text, to its own type.
-- GNU vector types are refused: they were read as their element type
-  before. `long double` (binary128) is described below.
+- GNU vector types are described below, after the complex types; they
+  were read as their element type before W5 refused them. `long double`
+  (binary128) is described below.
 
 W6 adds bit-fields:
 
@@ -350,8 +351,9 @@ front end (patches in `internal/cmd/vendorcc`) now implements them:
   (`sizeof` 24 where clang gives 11).
 
 Both are refused where nothing applies them: in a type name, before a member,
-on an `enum`. They are also refused on what is not implemented yet: `TI`,
-and a mode on a vector type (go-embedded-c/c#42). Packed bit-fields follow
+on an `enum`. They are also refused on what is not implemented yet: `TI`
+(go-embedded-c/c#42). A mode on a vector type applies to its element, and
+the vector keeps its size, as clang does. Packed bit-fields follow
 the bit-field rule above.
 
 The same patches fix a parser defect that dropped the middle values of an
@@ -495,6 +497,36 @@ calls compiler-rt's soft-float routines, as clang 23.1.4 emits them
   - `*=` or `/=` of a scalar by a complex value, whose real part is not the
     scalar times the real part.
 
+GNU vectors, `__attribute__((vector_size(N)))` (GCC manual, Vector
+Extensions):
+
+- A vector is `N` bytes of integer or floating elements, aligned on `N`,
+  as clang aligns it. It is handled as an aggregate, an array of its
+  elements: copied, stored and laid out as bytes.
+- BasicCABI.md leaves the ABI of vector types open ("not stable"). A vector
+  is passed through a pointer, like a structure, and returned through
+  `sret`, as clang returns it. clang passes one as a scalar per element; no
+  code compiled by clang exchanges vectors with ours.
+- Each operator applies element by element, in the element's type, without
+  the integer promotions:
+  - `+ - * / % & | ^ << >>` on two vectors, or on a vector and a scalar
+    converted to the element type, on either side;
+  - unary `+`, `-` (which flips the sign of `0.0` too) and `~`;
+  - `== != < > <= >=` give a vector of signed integers as wide as the
+    elements, `-1` where the relation holds and `0` elsewhere;
+  - `op=`, and `v[i]` as a value and as an lvalue;
+  - a cast between a vector and a vector or scalar of the same size keeps
+    the bytes.
+- Seven typing defects of cc/v4 fixed by vendorcc patches: a vector was
+  aligned on its element; `v + 2` and `1 << v` were typed `int`; the integer
+  promotions turned a vector of `short` into an `int`; `v[i]` was typed as
+  the whole vector; a comparison of vectors was an `int`; and the
+  initialisers of a vector were counted in bytes. Another patch applies a
+  `mode` attribute on a vector to its element, which the `mode` patch had
+  refused.
+- Refused: a `long double` operand, a cast between sizes, and
+  `__builtin_shuffle`.
+
 W7 adds `goto`:
 
 - A label is a block of the graph and a `goto` is an edge to it. The
@@ -545,8 +577,9 @@ does for structures, is the fifth):
   misaligning a `long long` in the varargs buffer, on the side that is
   ours.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-15, with `long double _Complex` and the complex builtins, 1617
-  files ran the same as under clang, 6 gained and none lost (1611 with
+  2026-11-15, with GNU vectors, 1639 files ran the same as under clang, 22
+  gained and none lost (1617 with `long double _Complex` and the complex
+  builtins, 6 gained and none lost, 1611 with
   integer complex types and `__real__`/`__imag__` as lvalues, 6 gained and
   none lost, 1605 with `float` and `double _Complex`, 6 gained and none lost, 1599
   with `__func__`, 4 gained

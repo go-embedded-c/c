@@ -343,9 +343,10 @@ var patches = []filePatch{
 	},
 	{
 		File: "type.go",
-		Why:  "the usual arithmetic conversions lost the complex domain when the other operand's real type ranked higher: long double + double _Complex was long double, double + float _Complex double, dropping the imaginary part; C11 6.3.1.8 converts \"without change of type domain\", and the result is complex when either operand is",
+		Why:  "the usual arithmetic conversions lost the complex domain when the other operand's real type ranked higher: long double + double _Complex was long double, double + float _Complex double, dropping the imaginary part; C11 6.3.1.8 converts \"without change of type domain\", and the result is complex when either operand is; and they dropped the vector of a vector and a scalar: v + 2, of a vector of short, was an int, while the scalar converts to the element type and the result is the vector (GCC manual, Vector Extensions; vector.go)",
 		Old:  "func UsualArithmeticConversions(a, b Type) (r Type) {\n",
 		New: "func UsualArithmeticConversions(a, b Type) (r Type) {\n" +
+			"\tif v := vectorOperand(a, b); v != nil {\n\t\treturn v\n\t}\n\n" +
 			"\tr = usualArithmeticConversions(a, b)\n" +
 			"\tif complexKinds[r.Kind()] || !complexKinds[a.Kind()] && !complexKinds[b.Kind()] {\n" +
 			"\t\treturn r\n\t}\n\n" +
@@ -384,7 +385,154 @@ var patches = []filePatch{
 		Old:  "\t\tn.checkUnion(c, a, fields)\n",
 		New:  "\t\tif c.itaniumLayout() && hasBitfield(fields) {\n\t\t\tc.layoutUnion(a, fields)\n\t\t} else {\n\t\t\tn.checkUnion(c, a, fields)\n\t\t}\n",
 	},
+	{
+		File: "type.go",
+		Why:  "a GNU vector is aligned on its size, as gcc and clang align it (clang 23.1.4 --target=wasm32-wasip1: _Alignof of a 16-byte vector of int is 16, of an 8-byte one 8), not on its element's (vector.go)",
+		Old:  "\tif n.attributer.p != nil {\n\t\tif v := n.attributer.p.Aligned(); v > 0 {\n\t\t\treturn int(v)\n\t\t}\n\t}\n\n\tif x, ok := n.c.ast.ABI.Types[n.kind]; ok {\n\t\treturn x.Align\n\t}\n",
+		New:  "\tif n.attributer.p != nil {\n\t\tif v := n.attributer.p.Aligned(); v > 0 {\n\t\t\treturn int(v)\n\t\t}\n\t}\n\n\tif v := n.VectorSize(); v > 0 {\n\t\treturn int(v)\n\t}\n\n\tif x, ok := n.c.ast.ABI.Types[n.kind]; ok {\n\t\treturn x.Align\n\t}\n",
+	},
+	{
+		File: "type.go",
+		Why:  "and so is it as a member",
+		Old:  "\tif x, ok := n.c.ast.ABI.Types[n.kind]; ok {\n\t\treturn x.FieldAlign\n\t}\n",
+		New:  "\tif v := n.VectorSize(); v > 0 {\n\t\treturn int(v)\n\t}\n\n\tif x, ok := n.c.ast.ABI.Types[n.kind]; ok {\n\t\treturn x.FieldAlign\n\t}\n",
+	},
+	{
+		File: "type.go",
+		Why:  "the array a vector is initialised as counted bytes, not elements: a 16-byte vector of int took 16 initialisers",
+		Old:  "\t\tvec = n.c.newArrayType(n, sz, nil)\n",
+		New:  "\t\tvec = n.c.newArrayType(n, vectorElems(n, sz), nil)\n",
+	},
+	{
+		File: "type.go",
+		Why:  "and the integer promotions turned a vector of short into an int: integer vector operations do not promote (GCC manual, Vector Extensions)",
+		Old:  "func IntegerPromotion(t Type) Type {\n\tswitch t.Kind() {\n",
+		New:  "func IntegerPromotion(t Type) Type {\n\tif isVectorType(t) {\n\t\treturn t\n\t}\n\n\tswitch t.Kind() {\n",
+	},
+	{
+		File: "check.go",
+		Why:  "a shift of a scalar by a vector, 1 << v, was typed as the scalar: it is the vector (GCC manual, Vector Extensions)",
+		Old:  "\t\t\tn.typ = IntegerPromotion(a)\n\t\t\tif b := a.BitField(); b != nil {\n",
+		New:  "\t\t\tn.typ = IntegerPromotion(a)\n\t\t\tif v := vectorOperand(a, b); v != nil {\n\t\t\t\tn.typ = v\n\t\t\t}\n\t\t\tif b := a.BitField(); b != nil {\n",
+	},
+	{
+		File: "check.go",
+		Why:  "an element of a vector, v[i], was typed as the whole vector",
+		Old:  "\t\tcase isVectorType(t1) && IsIntegerType(t2):\n\t\t\tn.typ = t1\n\t\tcase isVectorType(t2) && IsIntegerType(t1):\n\t\t\tn.typ = t2\n",
+		New:  "\t\tcase isVectorType(t1) && IsIntegerType(t2):\n\t\t\tn.typ = vectorElem(t1)\n\t\tcase isVectorType(t2) && IsIntegerType(t1):\n\t\t\tn.typ = vectorElem(t2)\n",
+	},
+	{
+		File: "check.go",
+		Why:  "an equality of vectors is a vector of signed integers of the same width, each -1 or 0, not an int (GCC manual, Vector Extensions)",
+		Old:  "\t\t\tn.typ = c.intT\n\t\tdefault:\n\t\t\tc.errors.add(errorf(\"%v: invalid operands: %s (%v) and %s (%v)\"",
+		New:  "\t\t\tn.typ = vectorCompare(a, b, c.intT)\n\t\tdefault:\n\t\t\tc.errors.add(errorf(\"%v: invalid operands: %s (%v) and %s (%v)\"",
+	},
+	{
+		File: "check.go",
+		Why:  "and so is a relation of vectors",
+		Old:  "\t\t\t// ok\n\t\tdefault:\n\t\t\tc.errors.add(errorf(\"%v: invalid operands: %s and %s\", n.Token.Position(), a, b))\n\t\t}\n\t\tn.setPure(n.RelationalExpression.Pure() && n.ShiftExpression.Pure())\n",
+		New:  "\t\t\tn.typ = vectorCompare(a, b, c.intT)\n\t\tdefault:\n\t\t\tc.errors.add(errorf(\"%v: invalid operands: %s and %s\", n.Token.Position(), a, b))\n\t\t}\n\t\tn.setPure(n.RelationalExpression.Pure() && n.ShiftExpression.Pure())\n",
+	},
 }
+
+// vectorGo is added to the package: the typing of GNU vectors.
+const vectorGo = `package cc
+
+// GNU vectors, __attribute__((vector_size(N))) (GCC manual, Vector
+// Extensions). cc/v4 keeps a vector as its element's predefined type with
+// the attribute, so its Kind is the element's; these functions give the
+// operators the types gcc and clang give them (go-embedded-c patch).
+
+// vectorElems is how many elements of type elem a vector of size bytes has.
+// elem may carry the vector attribute already, which makes its Size the
+// vector's: the element's size is its kind's.
+func vectorElems(elem Type, size int64) int64 {
+	s := elem.Size()
+	if p, ok := elem.(*PredefinedType); ok {
+		if x, ok := p.c.ast.ABI.Types[p.kind]; ok {
+			s = x.Size
+		}
+	}
+	if s > 0 {
+		return size / s
+	}
+
+	return size
+}
+
+// vectorElem is the element type of the vector t.
+func vectorElem(t Type) Type {
+	if p, ok := t.(*PredefinedType); ok {
+		if e := p.c.ast.kinds[p.kind]; e != nil {
+			return e
+		}
+	}
+
+	return t
+}
+
+// VectorElem returns the element type of the GNU vector type t and how many
+// elements it has; ok is false when t is not a vector.
+func VectorElem(t Type) (elem Type, n int64, ok bool) {
+	if t == nil || !isVectorType(t) {
+		return nil, 0, false
+	}
+
+	elem = vectorElem(t)
+	return elem, vectorElems(elem, t.Size()), true
+}
+
+// vectorOperand is the type of a binary operation of a and b when one is a
+// vector: that vector, the scalar converted to its element type. Nil when
+// neither is.
+func vectorOperand(a, b Type) Type {
+	switch {
+	case isVectorType(a):
+		return a
+	case isVectorType(b):
+		return b
+	}
+
+	return nil
+}
+
+// vectorCompare is the type of a comparison of a and b: when one is a
+// vector, a vector of signed integers as wide as its elements and as many
+// (clang: char, short, long or long long elements, -1 or 0), else def.
+func vectorCompare(a, b, def Type) Type {
+	v := vectorOperand(a, b)
+	if v == nil {
+		return def
+	}
+
+	p, ok := v.(*PredefinedType)
+	if !ok {
+		return def
+	}
+
+	var k Kind
+	switch vectorElem(v).Size() {
+	case 1:
+		k = SChar
+	case 2:
+		k = Short
+	case 4:
+		k = Int
+	case 8:
+		k = LongLong
+	default:
+		return def
+	}
+	e, ok := p.c.ast.kinds[k].(*PredefinedType)
+	if !ok {
+		return def
+	}
+
+	attr := newAttributes()
+	attr.setVectorSize(v.Size())
+	return e.setAttr(attr)
+}
+`
 
 // packedGo is added to the package: the packed attribute (go-embedded-c/c#42).
 const packedGo = `package cc
@@ -710,10 +858,17 @@ func (d *Declarator) applyMode(c *ctx) bool {
 	return true
 }
 
-// modeKind is the kind mode name gives a declaration of type t.
-func (c *ctx) modeKind(name string, t Type) (Kind, error) {
-	if t.VectorSize() > 0 {
-		return 0, fmt.Errorf("attribute mode on a vector type is not supported")
+// modeKind is the kind mode name gives a declaration of type t. On a
+// vector, the mode is its element's, and the vector keeps its size (clang
+// Sema::AddModeAttr, "Base type can also be a vector type": the element
+// count becomes the size over the new element's).
+func (c *ctx) modeKind(name string, t Type) (k Kind, err error) {
+	if v := t.VectorSize(); v > 0 {
+		defer func() {
+			if err == nil && (c.ast.ABI.Types[k].Size <= 0 || v%c.ast.ABI.Types[k].Size != 0) {
+				k, err = 0, fmt.Errorf("attribute mode %s on a vector of %d bytes", name, v)
+			}
+		}()
 	}
 
 	abi := c.ast.ABI
@@ -909,7 +1064,7 @@ func Generate(out, src string) error {
 	if err != nil {
 		return err
 	}
-	files := map[string]string{"budget.go": budgetGo, "mode.go": modeGo, "packed.go": packedGo, "bitfield.go": bitfieldGo}
+	files := map[string]string{"budget.go": budgetGo, "mode.go": modeGo, "packed.go": packedGo, "bitfield.go": bitfieldGo, "vector.go": vectorGo}
 	for _, e := range entries {
 		n := e.Name()
 		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {

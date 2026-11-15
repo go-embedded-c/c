@@ -105,14 +105,15 @@ func hasVLA(t cc.Type) bool {
 	return false
 }
 
-// isAggregate reports whether t is a struct or union, or a complex type,
-// which BasicCABI.md represents as a struct of its two parts (cx.go).
+// isAggregate reports whether t is a struct or union, a complex type,
+// which BasicCABI.md represents as a struct of its two parts (cx.go), or a
+// GNU vector, an array of its elements (vec.go).
 func isAggregate(t cc.Type) bool {
 	if t == nil {
 		return false
 	}
 	k := t.Kind()
-	return k == cc.Struct || k == cc.Union || isCx(t) || isLDCx(t)
+	return k == cc.Struct || k == cc.Union || isCx(t) || isLDCx(t) || isVec(t)
 }
 
 // passing is how BasicCABI.md passes a value of a type, as a parameter or
@@ -134,9 +135,16 @@ func abiOf(t cc.Type) (passing, scalar, bool) {
 	if isLD(t) {
 		return passQuad, scalar{vt: wasm.I64, bits: 64}, true
 	}
-	if isCx(t) || isLDCx(t) {
+	if isCx(t) || isLDCx(t) || isVec(t) {
 		// A struct of two parts, never a singleton (probed: clang passes
-		// double _Complex through a pointer, returns it through sret).
+		// double _Complex through a pointer, returns it through sret). A
+		// vector, whose ABI BasicCABI.md leaves open, goes the same way
+		// (vec.go).
+		if isVec(t) {
+			if _, _, _, ok := vecElem(t); !ok {
+				return 0, scalar{}, false
+			}
+		}
 		return passIndirect, scalar{vt: wasm.I32, bits: 32, ptr: true, elem: t.Size()}, true
 	}
 	if leaf, ok := singletonLeaf(t); ok && isAggregate(t) && isLD(leaf) {

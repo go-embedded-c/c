@@ -16,7 +16,7 @@ import (
 // gccTortureFloor is how many gcc 15.2.0 gcc.c-torture/execute files we
 // compile, link and run with clang's exit status and output. A change of
 // the generator must not lower it.
-const gccTortureFloor = 1617 // long double _Complex, measured 2026-11-15: 1617 same, 0 different, 3 known (integer complex: 1611, float and double _Complex: 1605, __func__: 1599, irreducible loops: 1595, labels as values: 1591, statement expressions: 1582, bit-fields of long long as narrow as int: 1577, Itanium bit-field layout: 1567, mode and packed: 1555, asm barriers, mode refused: 1552, long double: 1502, static member addresses and floating builtins: 1477, floating and byte builtins: 1472, computing builtins: 1440, function pointers: 1404, W7: 1381, compound literals: 1350, libc: 1327, W6: 1250, W5: 1160, W4d: 1049, W4c: 1005, W4b: 952, W4a: 762, W3: 454, W2: 10)
+const gccTortureFloor = 1639 // GNU vectors, measured 2026-11-15: 1639 same, 0 different, 3 known (long double _Complex: 1617, integer complex: 1611, float and double _Complex: 1605, __func__: 1599, irreducible loops: 1595, labels as values: 1591, statement expressions: 1582, bit-fields of long long as narrow as int: 1577, Itanium bit-field layout: 1567, mode and packed: 1555, asm barriers, mode refused: 1552, long double: 1502, static member addresses and floating builtins: 1477, floating and byte builtins: 1472, computing builtins: 1440, function pointers: 1404, W7: 1381, compound literals: 1350, libc: 1327, W6: 1250, W5: 1160, W4d: 1049, W4c: 1005, W4b: 952, W4a: 762, W3: 454, W2: 10)
 
 // knownDifferent are files whose result differs from clang's for a reason
 // that is not the generator's, each examined. A file listed here that
