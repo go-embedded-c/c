@@ -122,6 +122,17 @@ func (m *module) function(fd *cc.FunctionDefinition) error {
 		return unsupported(d, "function definition of type "+typeName(d.Type()))
 	}
 	m.fn = d.Name()
+	if cs := fd.CompoundStatement; cs != nil {
+		for l := cs.BlockItemList; l != nil; l = l.BlockItemList {
+			if bi := l.BlockItem; isFuncName(bi) {
+				id := bi.Declaration.InitDeclaratorList.InitDeclarator
+				if m.funcNames == nil {
+					m.funcNames = map[*cc.Declarator]*cc.InitDeclarator{}
+				}
+				m.funcNames[id.Declarator] = id
+			}
+		}
+	}
 	g := &fgen{m: m, fn: f.pos, name: d.Name(), complits: map[*cc.PostfixExpression]int64{}, vars: map[*cc.Declarator]uint32{}, void: f.result == nil, sig: f.sig,
 		cases: map[*cc.LabeledStatement]*block{}, labels: map[string]*block{}, slots: map[*cc.Declarator]int64{}, refs: map[*cc.Declarator]uint32{}}
 	if !g.void {

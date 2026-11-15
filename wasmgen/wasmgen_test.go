@@ -36,7 +36,6 @@ func TestUnsupported(t *testing.T) {
 	}
 	for _, tc := range []struct{ src, what string }{
 		{"int main(int c, char **v, char **e) { return 0; }", "main with parameters other than (int, char **)"},
-		{"int main(void) { return __func__[0]; }", "static local __func__"},
 		{"int f(int i) { typedef struct { int c[i + 2]; } c; return sizeof(c) * 3; } int main(void) { return f(1); }", "variable-length type"},
 		{"int f(int i) { return sizeof(int[i]); } int main(void) { return f(1); }", "sizeof of a variable-length type"},
 		{"int main(void) { int x = 1; switch (x) { case 1 ... 3: return 1; } return 0; }", "case range"},
@@ -390,6 +389,9 @@ func TestAgainstClang(t *testing.T) {
 		stmtExprProgram,
 		labelProgram,
 		irreducibleProgram,
+		// __func__ (C11 6.4.2.2): each function's own, printed, indexed, its
+		// size, its address stable across calls
+		"#include <stdio.h>\nstatic const char *who(void) { return __func__; }\nint main(void) { printf(\"%s %s %c %zu %d\\n\", __func__, who(), __func__[1], sizeof __func__, who() == who()); return 0; }",
 		// long double (binary128): storage, parameters, results, every
 		// operation, comparison and conversion, varargs
 		quadProgram,
