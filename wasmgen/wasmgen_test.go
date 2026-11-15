@@ -37,7 +37,6 @@ func TestUnsupported(t *testing.T) {
 	for _, tc := range []struct{ src, what string }{
 		{"int main(int c, char **v, char **e) { return 0; }", "main with parameters other than (int, char **)"},
 		{"int main(void) { return __func__[0]; }", "static local __func__"},
-		{"int main(void) { void *p = 0; goto *p; return 0; }", "computed goto"},
 		{"int f(int i) { typedef struct { int c[i + 2]; } c; return sizeof(c) * 3; } int main(void) { return f(1); }", "variable-length type"},
 		{"int f(int i) { return sizeof(int[i]); } int main(void) { return f(1); }", "sizeof of a variable-length type"},
 		{"int f(int x) { int i = 0; if (x) goto in; while (i < 10) { i += 2; in: i++; } return i; } int main(void) { return f(1); }", "irreducible control flow (W7)"},
@@ -359,6 +358,7 @@ func TestAgainstClang(t *testing.T) {
 		bitfieldLayoutProgram,
 		bitfieldTypeProgram,
 		stmtExprProgram,
+		labelProgram,
 		// long double (binary128): storage, parameters, results, every
 		// operation, comparison and conversion, varargs
 		quadProgram,
@@ -565,6 +565,47 @@ int main(void) {
 	({ for (i = 0; i < 3; i++) t(i); });
 	printf("\n%d %d\n", ({ int x = 0; do { x += 7; } while (x < 30); x; }), i);
 	return ({ int r = 0; r; });
+}
+`
+
+// labelProgram: labels as values. A threaded interpreter whose opcode table
+// is a static array of &&label; a table of label differences, jumped
+// through as &&base + offset; label addresses held in variables, compared
+// and passed around; two functions with labels of the same names.
+const labelProgram = `#include <stdio.h>
+static int run(const unsigned char *pc) {
+	static const void *ops[] = { &&halt, &&inc, &&dbl, &&neg, &&jnz };
+	int acc = 0, n = 0;
+	goto *ops[*pc];
+inc:	acc++; n++; goto *ops[*++pc];
+dbl:	acc *= 2; n++; goto *ops[*++pc];
+neg:	acc = -acc; n++; goto *ops[*++pc];
+jnz:	n++; if (acc != 0 && acc > -40) { pc -= 3; } else { pc++; } goto *ops[*pc];
+halt:	return acc * 1000 + n;
+}
+static int offsets(int i) {
+	static const int off[] = { &&a - &&a, &&b - &&a, &&c - &&a };
+	int r = 0;
+	goto *(&&a + off[i]);
+a:	r += 1;
+b:	r += 10;
+c:	r += 100;
+	return r;
+}
+static int same(int k) {
+	void *p = k ? &&a : &&b, *q = &&a;
+	int r = (p == q) * 7;
+	goto *p;
+a:	return r + 1;
+b:	return r + 2;
+}
+int main(void) {
+	static const unsigned char prog[] = { 1, 2, 3, 2, 4, 0 };
+	static const unsigned char prog2[] = { 1, 1, 2, 0 };
+	printf("%d %d\n", run(prog), run(prog2));
+	printf("%d %d %d\n", offsets(0), offsets(1), offsets(2));
+	printf("%d %d\n", same(1), same(0));
+	return 0;
 }
 `
 

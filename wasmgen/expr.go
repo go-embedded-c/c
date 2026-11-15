@@ -344,6 +344,10 @@ func (g *fgen) rvalue(e cc.ExpressionNode) (scalar, error) {
 		}
 		return s, g.operand(x.CastExpression, s)
 	case *cc.UnaryExpression:
+		if x.Case == cc.UnaryExpressionLabelAddr {
+			g.constant(g.m.labelID(x.Token2.SrcStr()), s)
+			return s, nil
+		}
 		return s, g.unary(x, s)
 	case *cc.PostfixExpression:
 		switch x.Case {
