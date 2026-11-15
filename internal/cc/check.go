@@ -5517,7 +5517,7 @@ func (n *PrimaryExpression) floatConst(c *ctx) (v Value, t Type) {
 
 		bf, _, err = big.ParseFloat(s[:len(s)-len("il")], 0, longDoublePrec, big.ToNearestEven)
 		if err == nil {
-			return &ComplexLongDoubleValue{Im: (*LongDoubleValue)(bf)}, c.ast.kinds[ComplexLong]
+			return &ComplexLongDoubleValue{Im: (*LongDoubleValue)(bf)}, c.ast.kinds[ComplexLongDouble]
 		}
 	case
 		strings.HasSuffix(s, "fi"),

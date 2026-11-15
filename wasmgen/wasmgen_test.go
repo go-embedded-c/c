@@ -40,7 +40,6 @@ func TestUnsupported(t *testing.T) {
 		{"int f(int i) { return sizeof(int[i]); } int main(void) { return f(1); }", "sizeof of a variable-length type"},
 		{"int main(void) { int x = 1; switch (x) { case 1 ... 3: return 1; } return 0; }", "case range"},
 		{"int main(void) { int x = 1; return x ?: 2; }", "?: without a middle operand"},
-		{"_Complex long double c; int main(void) { return 0; }", "file-scope object of type _Complex long double"},
 		{"struct S { long double d; }; struct S f(struct S s) { return s; } int main(void) { return 0; }", "parameter of type struct S {d long double}"},
 		{"struct S { long double d[1]; }; int g(struct S); int main(void) { struct S s = {1}; return g(s); }", "parameter of type struct S {d array of 1 long double}"},
 		{"long double d = 1e-4950L; int main(void) { return 0; }", "non-constant initializer"},
@@ -393,6 +392,7 @@ func TestAgainstClang(t *testing.T) {
 		irreducibleProgram,
 		complexProgram,
 		intComplexProgram,
+		ldComplexProgram,
 		// __func__ (C11 6.4.2.2): each function's own, printed, indexed, its
 		// size, its address stable across calls
 		"#include <stdio.h>\nstatic const char *who(void) { return __func__; }\nint main(void) { printf(\"%s %s %c %zu %d\\n\", __func__, who(), __func__[1], sizeof __func__, who() == who()); return 0; }",
@@ -796,6 +796,49 @@ int main(void) {
 	printf("%a %a %d\n", __real__ d, __imag__ d, (int)__real__ a);
 	c = 1.0 + 2.0i;
 	printf("%d %d %d\n", __real__ c, __imag__ c, !(a - a));
+	return 0;
+}
+`
+
+// ldComplexProgram: long double _Complex. Arithmetic, mixed with real
+// operands, the product and quotient through __multc3 and __divtc3 with an
+// infinity, conjugate and negation, ==, truth values, parameters and
+// results, conversions from double _Complex and to long double and double,
+// __real__ and __imag__ as values and lvalues, op=, a static initialiser.
+// Each part prints with %La, so all 113 bits show.
+const ldComplexProgram = `#include <stdio.h>
+typedef long double _Complex lc;
+static void show(const char *n, lc z) { printf("%s %La %La\n", n, __real__ z, __imag__ z); }
+static lc mul(lc a, lc b) { return a * b; }
+static lc dv(lc a, lc b) { return a / b; }
+static lc conj(lc x) { return ~x; }
+static lc g = 0.1L;
+int main(void) {
+	lc a, b, c;
+	double _Complex d = 1.0 + 2.0i;
+	long double r;
+	__real__ a = 0.1L; __imag__ a = -3.0L;
+	b = d;
+	b += 1.0L / 3;
+	show("add", a + b);
+	show("sub", a - b);
+	show("mul", mul(a, b));
+	show("div", dv(a, b));
+	show("inf", mul(__builtin_infl() + 1.0i, b));
+	show("mixed", 2.0L * a);
+	show("rdiv", a / 4.0L);
+	show("lrdiv", 1.0L / a);
+	show("neg", -a);
+	show("conj", conj(a));
+	show("imag", a + 2.0iL);
+	show("g", g);
+	c = a; c *= b; c -= 1.0L;
+	show("op", c);
+	r = a;
+	printf("%La %f %d %d %d %d\n", r, (double)b, a == a, a != b, !(0.0L * a), a == 0.1L - 3.0iL);
+	if (0.0L + 1.0iL) printf("true\n");
+	show("bconj", __builtin_conjl(a));
+	printf("%a %a %a %a\n", __builtin_creal(d), __builtin_cimag(d), (double)__builtin_crealf(1.5f + 2.5fi), (double)__builtin_cimagf(__builtin_conjf(1.5f + 2.5fi)));
 	return 0;
 }
 `

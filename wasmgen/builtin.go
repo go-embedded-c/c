@@ -47,6 +47,17 @@ func (g *fgen) builtin(x *cc.PostfixExpression, name string, args []cc.Expressio
 		return nil
 	}
 	switch b {
+	case "creal", "crealf", "cimag", "cimagf":
+		// __real__ and __imag__ of the argument converted to the complex
+		// type of the builtin's result's precision.
+		if err := arity(1); err != nil {
+			return true, err
+		}
+		s, ok := scalarOf(x.Type())
+		if !ok {
+			return true, unsupported(x, name+" of type "+typeName(x.Type()))
+		}
+		return true, g.cxPart(args[0], strings.HasPrefix(b, "cimag"), s)
 	case "expect":
 		// The value of its first argument (GCC manual).
 		if err := arity(2); err != nil {

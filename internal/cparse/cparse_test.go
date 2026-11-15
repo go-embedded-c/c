@@ -347,6 +347,25 @@ _Static_assert(sizeof(struct anon) == 3 && _Alignof(struct anon) == 1, "an unnam
 _Static_assert(sizeof(union u) == 3 && _Alignof(union u) == 1, "nor a union");
 `
 
+// complexTypingSource: the type of mixed real and complex operations keeps
+// the complex domain (C11 6.3.1.8), and an imaginary constant has the type
+// of its suffix. clang 23.1.4 (wasm32-wasip1, -std=gnu17 -fsyntax-only)
+// holds every assertion, measured 2026-11-15; cc/v4 typed ld + dc as long
+// double, d + fc as double, and 2.0iL as _Complex long.
+const complexTypingSource = `long double ld; double d; float _Complex fc; double _Complex dc; __complex__ int ic;
+_Static_assert(sizeof(ld + dc) == 32 && sizeof(dc + ld) == 32, "long double and double _Complex");
+_Static_assert(sizeof(d + fc) == 16 && sizeof(fc * d) == 16, "double and float _Complex");
+_Static_assert(sizeof(ic + d) == 16 && sizeof(ic + 1.0f) == 8, "integer complex and a floating real");
+_Static_assert(sizeof(2.0iL) == 32 && sizeof(2.0i) == 16 && sizeof(2.0fi) == 8, "imaginary constants");
+`
+
+// TestComplexTyping checks complexTypingSource.
+func TestComplexTyping(t *testing.T) {
+	if err := front(t).Source("c.c", []byte(complexTypingSource), cparse.Check); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestBitfieldLayout: the constant sizeof, _Alignof and offsetof of
 // structures with bit-fields, which cc/v4 folds itself and which no
 // generator-side check could catch (go-embedded-c/c#29).

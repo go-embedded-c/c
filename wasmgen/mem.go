@@ -99,6 +99,15 @@ func (m *module) staticValue(e cc.ExpressionNode, t cc.Type, seg *wasm.Segment, 
 		}
 		return nil
 	}
+	if isLDCx(t) {
+		// A real constant, computed exactly as quad.go does, and a +0
+		// imaginary part (the segment is zeroed). A complex constant would
+		// need the parts in 113 bits, which cxConst does not keep: refused.
+		if isCx(e.Type()) || isLDCx(e.Type()) || !ldStatic(e, seg.Init[off:]) {
+			return unsupported(e, "non-constant initializer")
+		}
+		return nil
+	}
 	if isCx(t) {
 		// The two parts of a constant, real then imaginary (cx.go); a real
 		// constant has an imaginary part of +0.
@@ -511,7 +520,7 @@ func (g *fgen) addr(e cc.ExpressionNode) error {
 			}
 			return g.ptrValue(x.CastExpression)
 		}
-		if (x.Case == cc.UnaryExpressionReal || x.Case == cc.UnaryExpressionImag) && isCx(x.UnaryExpression.Type()) {
+		if (x.Case == cc.UnaryExpressionReal || x.Case == cc.UnaryExpressionImag) && (isCx(x.UnaryExpression.Type()) || isLDCx(x.UnaryExpression.Type())) {
 			// __real__ z and __imag__ z designate the parts of z (GNU).
 			return g.cxPartAddr(x.UnaryExpression, x.Case == cc.UnaryExpressionImag)
 		}
@@ -652,6 +661,11 @@ func (g *fgen) aggAddr(e cc.ExpressionNode) error {
 	defer func() { g.depth-- }()
 	if isCx(e.Type()) {
 		if done, err := g.cxComputed(e); done {
+			return err
+		}
+	}
+	if isLDCx(e.Type()) {
+		if done, err := g.ldcxComputed(e); done {
 			return err
 		}
 	}
