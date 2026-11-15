@@ -347,8 +347,17 @@ func (m *module) staticObject(n cc.Node, d *cc.Declarator) (uint32, int64, error
 	if d.Linkage() == cc.None {
 		ds, ok := m.locals[d]
 		if !ok {
-			// __func__, whose declaration items leaves out.
-			return 0, 0, unsupported(n, "static local "+d.Name())
+			// __func__, whose declaration items leaves out: it is defined
+			// on its first use (C11 6.4.2.2p1: as if declared
+			// `static const char __func__[] = "name";`).
+			id := m.funcNames[d]
+			if id == nil {
+				return 0, 0, unsupported(n, "static local "+d.Name())
+			}
+			if err := m.staticLocal(m.fn, d, id); err != nil {
+				return 0, 0, err
+			}
+			ds = m.locals[d]
 		}
 		return ds.sym, 0, nil
 	}

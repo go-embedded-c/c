@@ -63,7 +63,9 @@ type module struct {
 	localNames map[string]bool
 	// Label addresses (labeladdr.go): the value of &&label, by function and
 	// label, and the labels whose address each function takes, in order.
-	fn          string // the function being compiled
+	fn string // the function being compiled
+	// The __func__ of each function, which items leaves out: defined on use.
+	funcNames   map[*cc.Declarator]*cc.InitDeclarator
 	labelIDs    map[labelKey]int64
 	takenLabels map[string][]string
 	// File-scope compound literals.
