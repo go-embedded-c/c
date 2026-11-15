@@ -68,9 +68,49 @@ type structurer struct {
 // statement expression may not hold here, no body has been found where the
 // structurer places anything after its end; the br does not rely on that.)
 func (g *fgen) structure(n cc.Node, exit *block) (out, []callSite, error) {
+	// An irreducible graph is made reducible by dispatch blocks
+	// (irreducible.go), one per multiple-entry loop; each fix is followed by
+	// a new analysis. The fixes add no copy of any code, and are bounded.
+	limit := 2*len(g.blocks) + 64
+	var order []*block
+	for fixes := 0; ; fixes++ {
+		var p, b *block
+		order, p, b = g.analyze(exit)
+		if p == nil {
+			break
+		}
+		if fixes == maxIrreducibleFixes || len(g.blocks) > limit || !g.fixIrreducible(order, exit, b) {
+			return out{}, nil, unsupported(n, "irreducible control flow beyond the limit")
+		}
+	}
+	entry := order[0]
+	s := &structurer{g: g, n: n, merge: map[*block]bool{}, loop: map[*block]bool{}}
+	for _, b := range order {
+		if b != entry {
+			b.idom.kids = append(b.idom.kids, b)
+		}
+		forward := 0
+		for _, p := range b.preds {
+			if p.rpo < b.rpo {
+				forward++
+				continue
+			}
+			s.loop[b] = true // a back edge, which analyze checked
+		}
+		s.merge[b] = forward >= 2
+	}
+	return g.emitStructured(s, entry, exit)
+}
+
+// analyze numbers the reachable blocks in reverse postorder, records their
+// predecessors and immediate dominators, and returns them in that order. It
+// also returns the first edge p -> b that goes back (p after b in the order)
+// although b does not dominate p, which makes the graph irreducible; nil if
+// none.
+func (g *fgen) analyze(exit *block) (order []*block, badP, badB *block) {
 	entry := g.blocks[0]
 	for _, b := range g.blocks {
-		b.rpo = -1
+		b.rpo, b.preds, b.idom, b.kids = -1, nil, nil, nil
 	}
 	if exit != nil {
 		exit.rpo = -1
@@ -98,7 +138,7 @@ func (g *fgen) structure(n cc.Node, exit *block) (out, []callSite, error) {
 		post = append(post, top.b)
 		stack = stack[:len(stack)-1]
 	}
-	order := make([]*block, len(post))
+	order = make([]*block, len(post))
 	for i, b := range post {
 		b.rpo = len(post) - 1 - i
 		order[b.rpo] = b
@@ -156,25 +196,20 @@ func (g *fgen) structure(n cc.Node, exit *block) (out, []callSite, error) {
 		}
 	}
 
-	s := &structurer{g: g, n: n, merge: map[*block]bool{}, loop: map[*block]bool{}}
 	for _, b := range order {
-		if b != entry {
-			b.idom.kids = append(b.idom.kids, b)
-		}
-		forward := 0
 		for _, p := range b.preds {
-			if p.rpo < b.rpo {
-				forward++
-				continue
-			}
 			// A back edge p -> b: reducible iff b dominates p.
-			if !dominates(b, p) {
-				return out{}, nil, unsupported(n, "irreducible control flow (W7)")
+			if p.rpo >= b.rpo && !dominates(b, p) {
+				return order, p, b
 			}
-			s.loop[b] = true
 		}
-		s.merge[b] = forward >= 2
 	}
+	return order, nil, nil
+}
+
+// emitStructured emits the analysed graph from entry, wrapped for a region
+// with an exit (see structure).
+func (g *fgen) emitStructured(s *structurer, entry, exit *block) (out, []callSite, error) {
 	if exit != nil {
 		s.emit(opBlock, voidBT)
 		s.doTree(entry, []frame{{frameBlock, exit}})
