@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float`, `double` and `long double` (binary128), bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), `asm` statements with an empty template, the `mode` and `packed` attributes, clang's bit-field layout and promotion, statement expressions, and labels as values. 1591 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals, `main(argc, argv)`, `float`, `double` and `long double` (binary128), bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), `asm` statements with an empty template, the `mode` and `packed` attributes, clang's bit-field layout and promotion, statement expressions, labels as values, and irreducible loops. 1595 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -450,10 +450,16 @@ W7 adds `goto`:
 - A label is a block of the graph and a `goto` is an edge to it. The
   Ramsey structuring that handles loops and `switch` turns the edge into a
   `br`.
-- Still refused:
-  - a `goto` into a loop from outside, which makes the graph irreducible
-    (node splitting comes later);
-  - GNU's block-local `__label__`.
+- A `goto` into a loop from outside makes the graph irreducible: the loop
+  has more than one entry. As in LLVM's WebAssemblyFixIrreducibleControlFlow,
+  each such loop gets a dispatch block.
+  - Every edge to one of the loop's entries sets a label variable to that
+    entry, then jumps to the dispatch block, which branches to it.
+  - The dispatch block becomes the loop's single entry.
+  - No code is copied, unlike node splitting (Ramsey, appendix A).
+  - A function may need at most 64 such blocks. Past that it is refused, so
+    a cell full of `goto`s cannot grow the module without bound.
+- Still refused: GNU's block-local `__label__`.
 - Labels as values (GNU `&&label`, `goto *p`):
   - wasm has no code addresses, so `&&label` is a number. It is distinct
     for each label whose address is taken, across the module, and never 0.
@@ -489,8 +495,9 @@ does for structures, is the fifth):
   misaligning a `long long` in the varargs buffer, on the side that is
   ours.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-15, with labels as values, 1591 files ran the same as under
-  clang, 9 gained and none lost (1582 with statement expressions, 5 gained
+  2026-11-15, with irreducible loops, 1595 files ran the same as under
+  clang, 4 gained and none lost (1591 with labels as values, 9 gained and
+  none lost, 1582 with statement expressions, 5 gained
   and none lost, 1577 with `long long` bit-fields as narrow
   as `int`, 10 gained and none lost, 1567 with the Itanium
   bit-field layout, 12 gained and none lost, 1555 with the `mode` and `packed`

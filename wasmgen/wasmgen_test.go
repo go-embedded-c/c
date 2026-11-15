@@ -39,7 +39,6 @@ func TestUnsupported(t *testing.T) {
 		{"int main(void) { return __func__[0]; }", "static local __func__"},
 		{"int f(int i) { typedef struct { int c[i + 2]; } c; return sizeof(c) * 3; } int main(void) { return f(1); }", "variable-length type"},
 		{"int f(int i) { return sizeof(int[i]); } int main(void) { return f(1); }", "sizeof of a variable-length type"},
-		{"int f(int x) { int i = 0; if (x) goto in; while (i < 10) { i += 2; in: i++; } return i; } int main(void) { return f(1); }", "irreducible control flow (W7)"},
 		{"int main(void) { int x = 1; switch (x) { case 1 ... 3: return 1; } return 0; }", "case range"},
 		{"int main(void) { int x = 1; return x ?: 2; }", "?: without a middle operand"},
 		{"_Complex long double c; int main(void) { return 0; }", "file-scope object of type _Complex long double"},
@@ -96,6 +95,34 @@ func TestUnsupported(t *testing.T) {
 	}
 }
 
+// TestIrreducibleBound: each loop entered at more than one block costs a
+// dispatch block, and a function may need at most 64 of them; past that it
+// is refused rather than compiled at any size. 64 loops each entered by a
+// goto compile, 65 do not.
+func TestIrreducibleBound(t *testing.T) {
+	f, err := cparse.New("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := func(n int) string {
+		var b strings.Builder
+		b.WriteString("int f(int x) { int i = 0;\n")
+		for k := range n {
+			fmt.Fprintf(&b, "if (x) goto in%d; while (i < 10) { i += 2; in%d: i++; }\n", k, k)
+		}
+		b.WriteString("return i; }\nint main(void) { return f(1); }\n")
+		return b.String()
+	}
+	if _, err := compile(t, f, src(64)); err != nil {
+		t.Errorf("64 irreducible loops: %v", err)
+	}
+	_, err = compile(t, f, src(65))
+	var u *wasmgen.Unsupported
+	if !errors.As(err, &u) || u.What != "irreducible control flow beyond the limit" {
+		t.Errorf("65 irreducible loops: %v, want the bound", err)
+	}
+}
+
 // TestCompileSeeds: every seed of FuzzCompile reaches the generator and is
 // compiled. The fuzz target skips what the front end or the generator
 // refuses, so a seed that stopped compiling would protect nothing, silently.
@@ -118,6 +145,9 @@ func TestCompileSeeds(t *testing.T) {
 
 var compileSeeds = []string{
 	"int main(void) { return 0; }",
+	// Irreducible loops (dispatch blocks) and labels as values.
+	"int f(int x) { int i = 0, a = 0; if (x) goto in; while (i < 10) { i += 2; in: i++; if (i & 4) goto B; } A: a++; if (a < 3) goto B; return i + a; B: a += 2; goto A; } int main(void) { return f(1); }",
+	"int f(int k) { static void *t[] = { &&a, &&b }; int r = 0; goto *t[k & 1]; a: r++; if (r < 5) goto *t[r & 1]; return r; b: r += 2; goto a; } int main(void) { return f(1) + ({ int q = 2; q * 3; }); }",
 	"long double g = 0.1L; long double f(long double x, int n, ...) { long double r = x * 2 + n; r += g; return r > 1 ? r : -r; } int main(void) { return (int)f(1.5L, 2) + !g; }",
 	"float f = 1.5f; double g(double d, float x) { return -d * x + (int)d; } int main(void) { double d = f; d /= 3; return g(d, 0.25f) < 1 && !d ? (unsigned)d : (long long)2.5e10; }",
 	"int main(void) { return 1 << 31; }",
@@ -359,6 +389,7 @@ func TestAgainstClang(t *testing.T) {
 		bitfieldTypeProgram,
 		stmtExprProgram,
 		labelProgram,
+		irreducibleProgram,
 		// long double (binary128): storage, parameters, results, every
 		// operation, comparison and conversion, varargs
 		quadProgram,
@@ -605,6 +636,62 @@ int main(void) {
 	printf("%d %d\n", run(prog), run(prog2));
 	printf("%d %d %d\n", offsets(0), offsets(1), offsets(2));
 	printf("%d %d\n", same(1), same(0));
+	return 0;
+}
+`
+
+// irreducibleProgram: loops entered at more than one block, which the
+// structurer reaches through dispatch blocks: a goto into a loop, two loops
+// that jump into each other, an irreducible loop inside another, a goto
+// into a loop from a switch. Each path prints, so the order of the visits
+// shows.
+const irreducibleProgram = `#include <stdio.h>
+static int into(int x) {
+	int i = 0;
+	if (x) goto in;
+	while (i < 10) { i += 2; in: i++; }
+	return i;
+}
+static int pingpong(int n) {
+	int a = 0, b = 0;
+	if (n & 1) goto B;
+A:	a++; printf("A");
+	if (a + b > n) return a * 10 + b;
+	goto B;
+B:	b++; printf("B");
+	if (b % 3 == 0) goto A;
+	if (a + b > n) return a * 10 + b;
+	goto B;
+}
+static int nested(int x) {
+	int i, s = 0;
+	for (i = 0; i < 3; i++) {
+		int j = 0;
+		if ((x + i) & 1) goto mid;
+	top:	j++;
+	mid:	s += j;
+		if (j < 3) goto top;
+	}
+	return s;
+}
+static int sw(int k) {
+	int r = 0, i = 0;
+	switch (k) {
+	case 1: goto in1;
+	case 2: goto in2;
+	}
+	for (; i < 4; i++) {
+		r += 1;
+	in1:	r += 10;
+	in2:	r += 100;
+	}
+	return r;
+}
+int main(void) {
+	printf("%d %d\n", into(0), into(1));
+	printf("%d %d\n", pingpong(5), pingpong(8));
+	printf("\n%d %d\n", nested(0), nested(1));
+	printf("%d %d %d\n", sw(0), sw(1), sw(2));
 	return 0;
 }
 `

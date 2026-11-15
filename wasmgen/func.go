@@ -52,6 +52,9 @@ type fgen struct {
 	dispatch  *block            // the target of every goto *, when there is one (labeladdr.go)
 	target    uint32            // the local holding the address a goto * jumps to
 
+	irrLabel    uint32 // the label of the dispatch blocks of irreducible loops (irreducible.go)
+	hasIrrLabel bool
+
 	// The linear-stack frame (mem.go), when the function needs one.
 	frame     bool
 	fp, top   uint32 // locals: the frame's base, and __stack_pointer on entry

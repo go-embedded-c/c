@@ -57,6 +57,12 @@ C produces irreducible graphs with `goto` into a loop. Ramsey's appendix A turns
 - Past the bound, a Diagnostic refuses the function, so the failure is a refusal and not a hang.
 - A dispatch loop is the planned fallback if the corpora show the bound is too tight. LLVM's `WebAssemblyFixIrreducibleControlFlow.cpp:23-26` does this: it adds "a new block that can dispatch to each of the loop entries". It costs a little run time but duplicates no code.
 
+**As built (2026-11-15).** The dispatch loop was chosen over node splitting (`wasmgen/irreducible.go`), because it copies no code, so the bound on module size holds by construction:
+- Each loop with more than one entry gets a dispatch block. Every edge to one of the loop's entries sets a label variable, through a block of its own, and jumps to it.
+- The graph is analysed again after each fix.
+- A function may need at most 64 fixes, and the blocks they add are bounded too. Past that, the function is refused ("irreducible control flow beyond the limit").
+- In the gcc torture corpus, every irreducible function is now compiled.
+
 ### ABI
 
 The ABI is `BasicCABI.md` version 1, which clang follows:
