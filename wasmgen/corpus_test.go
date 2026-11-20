@@ -153,6 +153,52 @@ func TestCorpusGCCTorture(t *testing.T) {
 		t.Errorf("%d files the same as clang, the floor is %d", pass, gccTortureFloor)
 	}
 	checkSameList(t, fate)
+	reportGap(t, fate, os.Getenv("CORACLE_ORACLE_REPORT"))
+}
+
+// reportGap reads a `coracle corpus --out` report and logs every file clang
+// compiles that does not run the same here, grouped by what happened to it.
+// That is the gap a wave can close: a refusal count also holds files clang
+// refuses, and those can never be counted (the __builtin_shuffle files,
+// for one, which clang does not know).
+func reportGap(t *testing.T, fate map[string]string, report string) {
+	t.Helper()
+	if report == "" {
+		return
+	}
+	data, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byFate := map[string][]string{}
+	compiled := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.SplitN(line, "\t", 4)
+		if len(f) < 2 || f[1] == "compile-fail" {
+			continue
+		}
+		compiled++
+		if v := fate[f[0]]; v != "same" {
+			byFate[v] = append(byFate[v], f[0])
+		}
+	}
+	if compiled == 0 {
+		t.Fatalf("%s holds no file clang compiled: not a coracle corpus report", report)
+	}
+	var keys []string
+	for k := range byFate {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := byFate[keys[i]], byFate[keys[j]]
+		return len(a) > len(b) || len(a) == len(b) && keys[i] < keys[j]
+	})
+	n := 0
+	for _, k := range keys {
+		n += len(byFate[k])
+		t.Logf("gap %3d  %s: %s", len(byFate[k]), k, strings.Join(byFate[k], " "))
+	}
+	t.Logf("gap: %d of the %d files clang compiles do not run the same here", n, compiled)
 }
 
 // sameList holds, one per line, the torture files that ran the same as
