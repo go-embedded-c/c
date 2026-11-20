@@ -612,6 +612,15 @@ does for structures, is the fifth):
     not count are refused by clang (`pr39228.c` uses `__builtin_isinfl`;
     `fp-cmp-4l.c` and `fp-cmp-8l.c` include a file from a directory clang
     is not given) or use `asm` or `__builtin_va_arg_pack`.
+  - A refusal count mixes files we could gain with files clang refuses too.
+    Most of the commonest causes above are of the second kind:
+    `__builtin_longjmp`, nested functions and `__builtin_shuffle`. Point
+    `CORACLE_ORACLE_REPORT` at a `coracle corpus --out` report of the same
+    directory, and the test also logs each file clang compiles that does not
+    run the same here, grouped by what happened to it. Measured 2026-11-20:
+    74 of the 1713 files clang compiles. Nine are refused on an `lvalue`
+    (mostly vector elements), five on a variable-length array, and eight on
+    `__int128` parameters and file-scope objects.
   - No other file differs. There are three known differences:
     - `shiftdi-2.c` comes from the oracle compiling with `-std=gnu89`,
       where a large decimal constant has another type (#20);
