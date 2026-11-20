@@ -401,7 +401,7 @@ var patches = []filePatch{
 		File: "type.go",
 		Why:  "the array a vector is initialised as counted bytes, not elements: a 16-byte vector of int took 16 initialisers",
 		Old:  "\t\tvec = n.c.newArrayType(n, sz, nil)\n",
-		New:  "\t\tvec = n.c.newArrayType(n, vectorElems(n, sz), nil)\n",
+		New:  "\t\tvec = n.c.newArrayType(vectorArrayElem(n), vectorElems(n, sz), nil)\n",
 	},
 	{
 		File: "type.go",
@@ -458,6 +458,19 @@ func vectorElems(elem Type, size int64) int64 {
 	}
 
 	return size
+}
+
+// vectorArrayElem is the element of the array a vector is initialised as,
+// for the attribute set on n. With the attribute among the declaration
+// specifiers (typedef int __attribute__((vector_size(16))) V), n carries it
+// already, and an array of n was an array of vectors: the initialiser 31 of
+// (V){31} was typed V and compiled as an aggregate.
+func vectorArrayElem(n *PredefinedType) Type {
+	if n.VectorSize() > 0 {
+		return vectorElem(n)
+	}
+
+	return n
 }
 
 // vectorElem is the element type of the vector t.

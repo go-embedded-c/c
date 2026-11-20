@@ -572,7 +572,27 @@ func (g *fgen) addr(e cc.ExpressionNode) error {
 			return nil
 		}
 	}
-	return unsupported(e, "lvalue")
+	return unsupported(e, "lvalue "+exprCase(e))
+}
+
+// exprCase names the production of e, so that a refusal counts the kinds
+// of expression apart.
+func exprCase(e cc.ExpressionNode) string {
+	switch x := e.(type) {
+	case *cc.PrimaryExpression:
+		return x.Case.String()
+	case *cc.PostfixExpression:
+		return x.Case.String()
+	case *cc.UnaryExpression:
+		return x.Case.String()
+	case *cc.CastExpression:
+		return x.Case.String()
+	case *cc.ConditionalExpression:
+		return x.Case.String()
+	case *cc.AssignmentExpression:
+		return x.Case.String()
+	}
+	return strings.TrimPrefix(fmt.Sprintf("%T", e), "*cc.")
 }
 
 // complit pushes the address of a compound literal in a function (C11

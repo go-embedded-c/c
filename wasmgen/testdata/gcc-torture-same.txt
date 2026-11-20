@@ -993,6 +993,7 @@ pr108064.c
 pr108498-1.c
 pr108498-2.c
 pr108789.c
+pr109040.c
 pr109778.c
 pr109925.c
 pr110115.c
@@ -1521,6 +1522,8 @@ pr93945.c
 pr94130.c
 pr94134.c
 pr94412.c
+pr94524-1.c
+pr94524-2.c
 pr94567.c
 pr94724.c
 pr94809.c
@@ -1556,11 +1559,16 @@ pure-1.c
 pushpop_macro.c
 regstack-1.c
 restrict-1.c
+scal-to-vec1.c
+scal-to-vec2.c
+scal-to-vec3.c
 scope-1.c
 shiftdi.c
 shiftopt-1.c
 signed1bitfield-1.c
 simd-1.c
+simd-2.c
+simd-4.c
 simd-5.c
 simd-6.c
 ssad-run.c

@@ -25,6 +25,19 @@ func vectorElems(elem Type, size int64) int64 {
 	return size
 }
 
+// vectorArrayElem is the element of the array a vector is initialised as,
+// for the attribute set on n. With the attribute among the declaration
+// specifiers (typedef int __attribute__((vector_size(16))) V), n carries it
+// already, and an array of n was an array of vectors: the initialiser 31 of
+// (V){31} was typed V and compiled as an aggregate.
+func vectorArrayElem(n *PredefinedType) Type {
+	if n.VectorSize() > 0 {
+		return vectorElem(n)
+	}
+
+	return n
+}
+
 // vectorElem is the element type of the vector t.
 func vectorElem(t Type) Type {
 	if p, ok := t.(*PredefinedType); ok {
