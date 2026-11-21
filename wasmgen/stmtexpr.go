@@ -4,6 +4,7 @@ import (
 	"maps"
 
 	"github.com/go-embedded-c/c/internal/cc"
+	"github.com/go-embedded-c/c/internal/wasm"
 )
 
 // Statement expressions, GNU C's ({ ... }) (GCC manual, Statements and
@@ -28,9 +29,45 @@ import (
 // stmtExpr compiles x. With want nil the value, if any, is discarded;
 // otherwise it is converted to want and pushed.
 func (g *fgen) stmtExpr(x *cc.PrimaryExpression, want *scalar) error {
+	if want == nil {
+		return g.stmtExprBody(x, nil)
+	}
+	return g.stmtExprBody(x, func(last cc.ExpressionNode) (wasm.ValType, error) {
+		from, err := g.rvalue(last)
+		if err != nil {
+			return 0, err
+		}
+		g.convert(from, *want)
+		return want.vt, nil
+	})
+}
+
+// stmtExprAgg compiles x, of structure, union or vector type, and pushes
+// the address of a frame temporary holding its value: a copy, as the value
+// of an assignment is, so that the object the last expression designates
+// may change afterwards without changing it (20020206-1.c assigns it).
+func (g *fgen) stmtExprAgg(x *cc.PrimaryExpression) error {
+	t := x.Type()
+	return g.stmtExprBody(x, func(last cc.ExpressionNode) (wasm.ValType, error) {
+		slot := g.frameSlot(t.Size(), t.Align())
+		g.slotAddress(slot)
+		if err := g.aggAddrAs(last, t); err != nil {
+			return 0, err
+		}
+		g.constant(t.Size(), intScalar)
+		g.op(0xfc, 10, 0, 0) // memory.copy
+		g.slotAddress(slot)
+		return wasm.I32, nil
+	})
+}
+
+// stmtExprBody compiles the body of x. With value nil the value, if any, is
+// discarded; otherwise value pushes it, from the last expression, and says
+// of what type.
+func (g *fgen) stmtExprBody(x *cc.PrimaryExpression, value func(last cc.ExpressionNode) (wasm.ValType, error)) error {
 	list := items(x.CompoundStatement)
 	var last cc.ExpressionNode
-	if want != nil {
+	if value != nil {
 		n := len(list)
 		if n == 0 || list[n-1].Case != cc.BlockItemStmt || list[n-1].Statement.Case != cc.StatementExpr ||
 			list[n-1].Statement.ExpressionStatement.ExpressionList == nil {
@@ -67,12 +104,11 @@ func (g *fgen) stmtExpr(x *cc.PrimaryExpression, want *scalar) error {
 	}
 	var res uint32
 	if last != nil {
-		from, err := g.rvalue(last)
+		vt, err := value(last)
 		if err != nil {
 			return err
 		}
-		g.convert(from, *want)
-		res = g.local(want.vt)
+		res = g.local(vt)
 		g.op(opLocalSet)
 		g.uleb(uint64(res))
 	}

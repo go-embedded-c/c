@@ -691,7 +691,7 @@ func (g *fgen) memberAddr(x *cc.PostfixExpression) error {
 
 // aggAddr pushes the address of a structure or union value: an lvalue's
 // object, or a frame temporary holding the result of a call, an assignment,
-// E1 ? E2 : E3 or a comma expression.
+// E1 ? E2 : E3, a comma expression or a statement expression.
 func (g *fgen) aggAddr(e cc.ExpressionNode) error {
 	if err := g.enter(e); err != nil {
 		return err
@@ -714,6 +714,14 @@ func (g *fgen) aggAddr(e cc.ExpressionNode) error {
 	}
 	e = strip(e)
 	switch x := e.(type) {
+	case *cc.PrimaryExpression:
+		if x.Case == cc.PrimaryExpressionStmt {
+			return g.stmtExprAgg(x)
+		}
+	case *cc.CastExpression:
+		if u, ok := x.Type().(*cc.UnionType); ok && x.Case == cc.CastExpressionCast {
+			return g.unionCast(x, u)
+		}
 	case *cc.PostfixExpression:
 		if x.Case == cc.PostfixExpressionCall {
 			var slot int64
@@ -762,6 +770,53 @@ func (g *fgen) aggAddr(e cc.ExpressionNode) error {
 		}
 	}
 	return g.addr(e)
+}
+
+// unionCast compiles (U)e, GNU C's cast to a union (GCC manual, Cast to a
+// Union Type): a union of type U whose member of e's type holds e's value.
+// It pushes the address of a zeroed frame temporary with that member
+// stored; the bytes the member does not cover are zero, as in a union
+// initialised from that member.
+func (g *fgen) unionCast(x *cc.CastExpression, u *cc.UnionType) error {
+	e := x.CastExpression
+	var f *cc.Field
+	for i := range u.NumFields() {
+		if m := u.FieldByIndex(i); m != nil && !m.IsBitfield() && m.Type().IsCompatible(e.Type()) {
+			f = m
+			break
+		}
+	}
+	if f == nil {
+		return unsupported(x, "cast of "+typeName(e.Type())+" to a union without a member of its type")
+	}
+	if isLD(f.Type()) || isLDCx(f.Type()) {
+		return unsupported(x, "cast of "+typeName(e.Type())+" to a union")
+	}
+	slot := g.frameSlot(u.Size(), u.Align())
+	g.slotAddress(slot)
+	g.constant(0, intScalar)
+	g.constant(u.Size(), intScalar)
+	g.op(0xfc, 11, 0) // memory.fill
+	g.slotAddress(slot)
+	if f.Offset() != 0 {
+		g.constant(f.Offset(), intScalar)
+		g.op(opI32Add)
+	}
+	if s, ok := scalarOf(f.Type()); ok {
+		if err := g.operand(e, s); err != nil {
+			return err
+		}
+		op, align := s.store()
+		g.memargOff(op, align, 0)
+	} else {
+		if err := g.aggAddrAs(e, f.Type()); err != nil {
+			return err
+		}
+		g.constant(f.Type().Size(), intScalar)
+		g.op(0xfc, 10, 0, 0) // memory.copy
+	}
+	g.slotAddress(slot)
+	return nil
 }
 
 // aggAssign compiles E1 = E2 for structures and unions: E2 first, as for

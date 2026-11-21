@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals and `__func__`, `main(argc, argv)`, `float`, `double` and `long double` (binary128), `float`, `double`, `long double` and GNU integer `_Complex`, bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), `asm` statements with an empty template, the `mode` and `packed` attributes, clang's bit-field layout and promotion, statement expressions, labels as values, irreducible loops, and GNU vectors. 1647 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals and `__func__`, `main(argc, argv)`, `float`, `double` and `long double` (binary128), `float`, `double`, `long double` and GNU integer `_Complex`, bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), `asm` statements with an empty template, the `mode` and `packed` attributes, clang's bit-field layout and promotion, statement expressions, labels as values, irreducible loops, GNU vectors and casts to a union. 1650 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -315,9 +315,17 @@ expression statement; when the last item is not an expression, they are
   body, wrapped in a wasm `block` that is its only exit. It is emitted inline
   in the enclosing expression, so values already on the stack stay under it.
   The value goes out through a local.
+- A structure, union or vector value is copied into a frame temporary,
+  whose address goes out. It is a copy, as the value of an assignment is:
+  `d = ({ struct A x = s; s.b = 7; x; })` gives `d` the old `s`.
 - Jumping into a statement expression is not permitted (GCC manual). Jumping
   out of one with `break`, `continue` or `goto` is permitted by GCC and
   refused here, as are a label and a `goto` inside one.
+
+A cast to a union, GNU C's `(union U) e` (GCC manual, Cast to a Union
+Type), is a union whose member of `e`'s type holds `e`: a zeroed frame
+temporary with that member stored. A union with no member of that type,
+and a `long double` member, are refused.
 
 `asm` statements with an empty template, the optimisation barriers of the
 gcc torture tests (`asm volatile ("" : : : "memory")`, `asm ("" : "+r" (x))`,
@@ -583,9 +591,11 @@ does for structures, is the fifth):
   misaligning a `long long` in the varargs buffer, on the side that is
   ours.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-20, with the vector attribute among the declaration specifiers
-  (`typedef int __attribute__((vector_size(16))) V`), 1647 files ran the
-  same as under clang, 8 gained and none lost (1639 with GNU vectors, 22
+  2026-11-20, with statement expressions whose value is a structure or a
+  union and GNU casts to a union, 1650 files ran the same as under clang, 3
+  gained and none lost (1647 with the vector attribute among the
+  declaration specifiers (`typedef int __attribute__((vector_size(16)))
+  V`), 8 gained and none lost, 1639 with GNU vectors, 22
   gained and none lost, 1617 with `long double _Complex` and the complex
   builtins, 6 gained and none lost, 1611 with
   integer complex types and `__real__`/`__imag__` as lvalues, 6 gained and

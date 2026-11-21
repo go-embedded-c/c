@@ -73,6 +73,15 @@ func TestUnsupported(t *testing.T) {
 		{"int n = 2; void bar(char a[2][n]) { a[1][0] = 1; } int main(void) { return 0; }", "parameter of type pointer to array of char"},
 		{"int main(void) { return (int)__builtin_return_address(0); }", "builtin __builtin_return_address"},
 		{"int f(); int main(void) { return f(1); }", "call with arguments of a function declared without them in another unit"},
+		{"union U { int i; char *p; }; int main(void) { union U u = (union U)1.5; return u.i; }", "cast of double to a union without a member of its type"},
+		{"union U { int i; long double d; }; int main(void) { union U u = (union U)1.5L; return u.i; }", "cast of long double to a union"},
+		// A refusal inside a cast to a union or a statement expression is
+		// the construct's: a scalar member, an aggregate member, a scalar
+		// value, an aggregate value.
+		{"union U { int i; }; int main(void) { union U u = (union U)__builtin_classify_type(1); return u.i; }", "builtin __builtin_classify_type"},
+		{"union U { int i; char *p; }; union V { union U u; }; int main(void) { union V v = (union V)(union U)1.5; return v.u.i; }", "cast of double to a union without a member of its type"},
+		{"int main(void) { return ({ __builtin_classify_type(1); }); }", "builtin __builtin_classify_type"},
+		{"union U { int i; char *p; }; int main(void) { union U d; d = ({ (union U)1.5; }); return d.i; }", "cast of double to a union without a member of its type"},
 	} {
 		_, err := compile(t, f, tc.src)
 		var u *wasmgen.Unsupported
@@ -393,6 +402,7 @@ func TestAgainstClang(t *testing.T) {
 		intComplexProgram,
 		ldComplexProgram,
 		vectorProgram,
+		aggValueProgram,
 		// __func__ (C11 6.4.2.2): each function's own, printed, indexed, its
 		// size, its address stable across calls
 		"#include <stdio.h>\nstatic const char *who(void) { return __func__; }\nint main(void) { printf(\"%s %s %c %zu %d\\n\", __func__, who(), __func__[1], sizeof __func__, who() == who()); return 0; }",
@@ -865,6 +875,35 @@ int main(void) {
 	{ v4hs a = {1, -2, 3}, b = (v4hs){4} * a + ghs; printf("spec %d %d %d %d %zu\n", b[0], b[1], b[2], b[3], sizeof b); }
 	printf("%d %d %zu %zu\n", (gi + j)[1], (gi == gi)[3], sizeof(v8qi), _Alignof(v2df));
 	printf("%llx %llx %d\n", (unsigned long long)q, (long long)(v2si){5, 0x3ff00000}, (int)(v4qi){1, 2, 3, 4});
+	return 0;
+}
+`
+
+// aggValueProgram: statement expressions whose value is a structure or a
+// union (nested, assigned, passed, selected from, and a copy: the object
+// the last expression names changes afterwards, 20020206-1.c), and GNU
+// casts to a union from each kind of member (960416-1.c).
+const aggValueProgram = `#include <stdio.h>
+struct A { unsigned a, b, c; };
+union U { unsigned long long d; struct { unsigned l, h; } s; double f; char *p; struct A t; };
+static struct A bar(void) { return (struct A){176, 52, 31}; }
+static void show(const char *n, struct A a) { printf("%s %u %u %u\n", n, a.a, a.b, a.c); }
+static void showu(const char *n, union U u) { printf("%s %llx %u %u\n", n, u.d, u.s.l, u.s.h); }
+int main(void) {
+	struct A d, s = {1, 2, 3};
+	union U u;
+	char c[] = "xyz";
+	d = ({ ({ bar(); }); }); show("nest", d);
+	d = ({ s; }); s.a = 9; show("copy", d);
+	d = ({ struct A x = s; s.b = 7; x; }); show("local", d); show("s", s);
+	show("arg", ({ int i = 2; s.c += i; s; }));
+	printf("sel %u\n", ({ bar(); }).b);
+	u = ({ union U v; v.d = 5; v; }); showu("union", u);
+	showu("ull", (union U)0x100000000ULL);
+	showu("dbl", (union U)1.5);
+	u = (union U)c; printf("ptr %s\n", u.p);
+	u = (union U)s; show("mem", u.t);
+	printf("%u\n", ((union U)0x1234567800000009ULL).s.h);
 	return 0;
 }
 `
