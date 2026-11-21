@@ -28,6 +28,115 @@ func compile(t testing.TB, f *cparse.Front, src string) ([]byte, error) {
 	return wasmgen.Compile(ast, "t.c")
 }
 
+// TestInt128Refusals: a refusal inside any operand of an __int128 operation
+// reaches the caller, from every position the generator evaluates one in.
+// __builtin_classify_type is refused, so it marks where the error must come
+// out; a position that dropped it would compile and run something else.
+func TestInt128Refusals(t *testing.T) {
+	f, err := cparse.New("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const refused = "builtin __builtin_classify_type"
+	const u = "__builtin_classify_type(1)"
+	const pre = "typedef __int128 S; S g(int); "
+	for _, body := range []string{
+		"S f(S d) { return d + (S)" + u + "; }",
+		"S f(S d) { return (S)" + u + " + d; }",
+		"S f(void) { return (S)" + u + "; }",
+		"S f(void) { return (S)(long double)" + u + "; }",
+		"long double f(S d) { return (long double)(d + (S)" + u + "); }",
+		"int f(S d) { return (int)(d + (S)" + u + "); }",
+		"int f(void) { if ((S)" + u + ") return 1; return 0; }",
+		"S f(void) { return -(S)" + u + "; }",
+		"S f(void) { return ~(S)" + u + "; }",
+		"S f(S d) { return d << " + u + "; }",
+		"S f(void) { return ((S)" + u + ") << 3; }",
+		"S f(S d) { return " + u + " ? d : d; }",
+		"S f(S d) { return d ? (S)" + u + " : d; }",
+		"S f(S d) { return d ? d : (S)" + u + "; }",
+		"S f(S d) { return (" + u + ", d); }",
+		"S f(void) { return g(" + u + "); }",
+		"int f(S d) { return d < (S)" + u + "; }",
+		"int f(S d) { return (S)" + u + " < d; }",
+		"S f(void) { return ++*(S *)" + u + "; }",
+		"S f(void) { return (*(S *)" + u + ")--; }",
+		"void f(S d) { d = (S)" + u + "; }",
+		"void f(S d) { d += (S)" + u + "; }",
+		"void f(S d) { d <<= " + u + "; }",
+		"void f(S d) { *(S *)" + u + " = d; }",
+		"void f(S d) { d += (double)" + u + "; }",
+		"void f(S d) { *(S *)" + u + " += 1.5; }",
+		"void f(S d) { int k = 1; k += (S)" + u + "; }",
+		"void f(S d) { *(int *)" + u + " += d; }",
+		"int f(S d) { return d < (double)" + u + "; }",
+		"int f(void) { return !(S)" + u + "; }",
+		"void f(void) { g(" + u + "); }",
+		"void f(void) { -(S)" + u + "; }",
+		"void v(int, ...); void f(void) { v(1, (S)" + u + "); }",
+		"S f(S d) { return (S)(" + u + " ? 1.5 : 2); }",
+	} {
+		_, err := compile(t, f, pre+body+" int main(void) { return 0; }")
+		var un *wasmgen.Unsupported
+		if !errors.As(err, &un) || un.What != refused {
+			t.Errorf("%q: %v, want unsupported %q", body, err, refused)
+		}
+	}
+	_, err = compile(t, f, pre+"S f(S d) { return d ?: d; } int main(void) { return 0; }")
+	var un *wasmgen.Unsupported
+	if !errors.As(err, &un) || un.What != "?: without a middle operand" {
+		t.Errorf("?: of an __int128: %v", err)
+	}
+	// Each nested operation enters one level: past the limit the
+	// expression is refused, not walked to a stack overflow. The refusal is
+	// at a negation: one at the leaf would mean the walk went all the way
+	// down before anything stopped it.
+	nest := pre + "S f(S d) { return " + strings.Repeat("- ", 1001)
+	_, err = compile(t, f, nest+"d; } int main(void) { return 0; }")
+	if !errors.As(err, &un) || un.What != "expression nested deeper than the limit" || un.Pos == fmt.Sprintf("t.c:1:%d", len(nest)+1) {
+		t.Errorf("1001 nested negations: %v", err)
+	}
+	// Comparing an __int128 with a vector is refused, not miscompiled.
+	_, err = compile(t, f, pre+"typedef long v2 __attribute__((vector_size(16))); int f(S d, v2 v) { return d < v; } int main(void) { return 0; }")
+	if !errors.As(err, &un) {
+		t.Errorf("__int128 < vector: %v", err)
+	}
+	// So is converting a vector of the same size to one.
+	_, err = compile(t, f, pre+"typedef int v4 __attribute__((vector_size(16))); S f(v4 v) { return (S)v; } int main(void) { return 0; }")
+	if !errors.As(err, &un) || !strings.HasPrefix(un.What, "conversion of ") {
+		t.Errorf("vector to __int128: %v", err)
+	}
+	// A constant division by zero is undefined; it is left to run time, not
+	// folded (math/big would panic).
+	if _, err := compile(t, f, pre+"S f(void) { return (S)1 / (S)0 + (S)1 % (S)0; } int main(void) { return 0; }"); err != nil {
+		t.Errorf("constant __int128 division by zero: %v", err)
+	}
+}
+
+// TestInt128Inline: a shift by a constant below 128, and the operations clang
+// inlines, call no library routine; a variable shift calls one. That the
+// results are right is TestAgainstClang's; that the inline path was taken is
+// only visible here.
+func TestInt128Inline(t *testing.T) {
+	f, err := cparse.New("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	has := func(src, name string) bool {
+		obj, err := compile(t, f, "typedef __int128 S; "+src+" int main(void) { return 0; }")
+		if err != nil {
+			t.Fatalf("%q: %v", src, err)
+		}
+		return bytes.Contains(obj, []byte(name))
+	}
+	if has("S f(S d) { return (d << 5) + (d >> 70) + (d >> 64); }", "__ashlti3") || has("S f(S d) { return d >> 5; }", "__ashrti3") {
+		t.Error("a shift by a constant called the library")
+	}
+	if !has("S f(S d, int n) { return d << n; }", "__ashlti3") {
+		t.Error("a shift by a variable did not call __ashlti3")
+	}
+}
+
 // TestUnsupported: everything past W2 is refused by name, not miscompiled.
 func TestUnsupported(t *testing.T) {
 	f, err := cparse.New("", "")
@@ -46,6 +155,13 @@ func TestUnsupported(t *testing.T) {
 		{"int main(void) { long double d = 1e-4950L; return d; }", "long double constant 1e-4950L"},
 		{"int n; long double d = n; int main(void) { return 0; }", "non-constant initializer"},
 		{"int main(void) { long double d = 1; int k = 3; k %= d; return k; }", "compound assignment of a scalar by a long double"},
+		{"int n; __int128 d = n; int main(void) { return 0; }", "non-constant initializer"},
+		{"int main(void) { long double l = 1; __int128 d = 1; d += l; return (int)d; }", "compound assignment of an __int128 by long double"},
+		{"int main(void) { double f = 1; __int128 d = 1; f += d; return (int)f; }", "compound assignment by an __int128 in double"},
+		{"int main(void) { int k = 3; __int128 d = 1; k <<= d; return k; }", "compound assignment of a scalar by an __int128"},
+		{"int main(void) { __int128 d = 1; int *p = 0; p += d; return p != 0; }", "compound assignment of a pointer by an __int128"},
+		{"struct S { __int128 x; }; int f(struct S s) { return (int)s.x; } int main(void) { return 0; }", "parameter of type struct S {x __int128}"},
+		{"union U { __int128 x; long y; }; int main(void) { union U u = (union U)(__int128)5; return (int)u.y; }", "cast of __int128 to a union"},
 		{"int main(void) { return (int)__builtin_nanl(\"0x1g\"); }", "__builtin_nanl of a string clang does not read as a number"},
 		{"typedef float v4 __attribute__((vector_size(16))); v4 f(v4 a) { return a + 1.0L; } int main(void) { return 0; }", "vector operand of type long double"},
 		{"void f(int n) { struct S { int i[n]; int k; } s; } int main(void) { f(1); return 0; }", "local of type struct S {i array of int; k int}"},
@@ -403,6 +519,7 @@ func TestAgainstClang(t *testing.T) {
 		ldComplexProgram,
 		vectorProgram,
 		aggValueProgram,
+		int128Program,
 		// __func__ (C11 6.4.2.2): each function's own, printed, indexed, its
 		// size, its address stable across calls
 		"#include <stdio.h>\nstatic const char *who(void) { return __func__; }\nint main(void) { printf(\"%s %s %c %zu %d\\n\", __func__, who(), __func__[1], sizeof __func__, who() == who()); return 0; }",
@@ -904,6 +1021,95 @@ int main(void) {
 	u = (union U)c; printf("ptr %s\n", u.p);
 	u = (union U)s; show("mem", u.t);
 	printf("%u\n", ((union U)0x1234567800000009ULL).s.h);
+	return 0;
+}
+`
+
+// int128Program: __int128 and unsigned __int128. Every operator in both
+// signednesses with carries and borrows across bit 64, division and remainder
+// with negative operands, shifts by constants on both sides of 64 and by
+// variables, comparisons that the high half and the low half each decide,
+// conversions to and from the narrower integers, double and long double,
+// ++ and --, op= with narrower and wider operands, parameters, results,
+// varargs, statics with constants above 64 bits, ?:, and the truth values.
+// Each value prints as its two halves.
+const int128Program = `#include <stdio.h>
+typedef __int128 S;
+typedef unsigned __int128 U;
+static U gu = ((U)0x0123456789abcdefULL << 64) | 0xfedcba9876543210ULL;
+static S gs = -((S)1 << 100) + 12345;
+static S garr[2] = {-1, (S)3 << 70};
+static void pu(const char *n, U v) { printf("%s %016llx%016llx\n", n, (unsigned long long)(v >> 64), (unsigned long long)v); }
+static void ps(const char *n, S v) { pu(n, (U)v); }
+static S idS(S x) { return x; }
+static U addU(U a, U b) { return a + b; }
+static S mix(int a, S b, double c, U d, char e) { return b * a + (S)c + (S)d + e; }
+static S vsum(int n, ...) {
+	__builtin_va_list ap; S t = 0;
+	__builtin_va_start(ap, n);
+	while (n--) t += __builtin_va_arg(ap, S);
+	__builtin_va_end(ap);
+	return t;
+}
+int main(void) {
+	volatile int sh = 70, sh2 = 5, z = 0;
+	S a = ((S)0x7fffffffffffffffLL << 64) | 0xffffffffffffffffULL, b = -3, c = 1, d = -((S)1 << 90) - 7;
+	U ua = ~(U)0, ub = (U)1 << 64, uc = 12345678901234567890ULL;
+	pu("gu", gu); ps("gs", gs); ps("g0", garr[0]); ps("g1", garr[1]);
+	ps("add", a + c); ps("add2", b + c); ps("add3", ub - 1 + (U)1);
+	pu("uadd", ua + 1); pu("usub", (U)0 - 1); pu("usub2", ub - 1); pu("sub", (U)(d - b));
+	ps("neg", -d); ps("neg0", -(S)0); ps("neg1", -c); pu("negmin", (U)-((S)1 << 127));
+	ps("cpl", ~d); pu("ucpl", ~ub);
+	ps("and", d & a); ps("or", d | c); ps("xor", d ^ a);
+	pu("uand", ua & ub); pu("uor", ub | uc); pu("uxor", ua ^ uc);
+	ps("mul", d * b); ps("mul2", a * a); pu("umul", ua * ua); pu("umul2", uc * uc);
+	ps("div", d / b); ps("div2", d / 7); ps("div3", (-d) / (-b)); ps("mod", d % b); ps("mod2", d % -7); ps("mod3", -d % 1000);
+	pu("udiv", ua / uc); pu("umod", ua % uc); pu("udiv2", ub / 3);
+	ps("shl1", c << 1); ps("shl63", c << 63); ps("shl64", c << 64); ps("shl65", c << 65); ps("shl127", c << 127);
+	ps("shr1", d >> 1); ps("shr63", d >> 63); ps("shr64", d >> 64); ps("shr70", d >> 70); ps("shr127", d >> 127);
+	pu("ushr1", ua >> 1); pu("ushr64", ua >> 64); pu("ushr100", ua >> 100); pu("ushl3", ua << 3); pu("ushl0", ub << 0);
+	ps("vshl", c << sh); ps("vshr", d >> sh); pu("vushr", ua >> sh); ps("vshl5", d << sh2); ps("vshr5", d >> sh2);
+	printf("cmp %d%d%d%d%d%d\n", d < b, d <= b, d > b, d >= b, d == b, d != b);
+	printf("cmp2 %d%d%d%d%d%d\n", a < d, a <= a, a > d, a >= a, a == a, a != d);
+	printf("ucmp %d%d%d%d%d%d\n", ua < ub, ua <= ub, ua > ub, ua >= ub, ua == ub, ua != ub);
+	printf("ucmp2 %d%d%d%d\n", ub < ub + 1, ub + 1 > ub, ub - 1 < ub, ub > ub - 1);
+	printf("mixcmp %d %d %d\n", (S)-1 < (U)0, -1 < d, ua > (S)5);
+	printf("sm %d %d\n", d < 0, (S)0x7fffffffffffffffLL + 1 > 0);
+	printf("truth %d %d %d %d %d\n", !d, !(S)0, !!ub, d && c, z || (S)0);
+	if (ub) printf("if-ub\n");
+	if (!(ub >> 64 >> 1)) printf("if-zero\n");
+	while (c) c >>= 1;
+	printf("loop %d\n", (int)(c == 0));
+	printf("conv %d %u %lld %llu %d\n", (int)d, (unsigned)ua, (long long)d, (unsigned long long)d, (char)ua);
+	printf("conv2 %d %d %g %g %Lg\n", (short)ub, (_Bool)ub, (double)d, (double)ua, (long double)d);
+	printf("conv3 %g %g\n", (double)(float)ua, (double)(S)-5);
+	{ S i = -5; U j = -5; long long k = -5; unsigned long long m = 5; unsigned char uc2 = 200; signed char sc = -100;
+	  ps("fi", i); pu("fj", j); ps("fk", k); ps("fm", m); ps("fu", uc2); ps("fc", sc); pu("fcu", (U)sc); ps("fb", (_Bool)7); }
+	{ double x = -1.5e30, y = 3.0e38, w = 4.0e18; float f = -7.9f; long double q = -1.0e30L;
+	  ps("dx", (S)x); ps("dy", (S)y); pu("dw", (U)w); ps("df", (S)f); ps("dq", (S)q); pu("duq", (U)(q * -1)); ps("dx1", x); }
+	printf("%d%d%d\n", (S)3.9 == 3, (U)ub == ub, (S)-0.5 == 0);
+	{ S x = 5; x += d; ps("pe1", x); x -= 1; x *= 3; ps("pe2", x); x /= 5; x %= 100000007; ps("pe3", x);
+	  x <<= 3; x >>= 1; x |= 1; x &= ~(S)2; x ^= (S)1 << 80; ps("pe4", x);
+	  x = 17; x += 1.5; ps("pe5", x); x *= -2; ps("pe6", x); }
+	{ S x = 7; int n = 3; x += n; x *= (char)2; ps("ie", x); n += d; printf("narrow %d\n", n);
+	  unsigned char uch = 250; uch += (S)10; printf("uch %d\n", uch); long long ll = 5; ll *= (S)1 << 40; printf("ll %lld\n", ll);
+	  U ui = 3; ui *= -1; pu("ui", ui); unsigned int u32 = 4000000000u; u32 += (U)u32; printf("u32 %u\n", u32); }
+	{ S x = -1; S y = x++; ps("post", y); ps("post2", x); y = ++x; ps("pre", y); y = x--; ps("postd", y); ps("postd2", x); y = --x; ps("pred", y); ps("pred2", x);
+	  U u = ~(U)0 >> 64; u++; pu("carry", u); u--; pu("borrow", u); ++u; pu("c2", u); S big = (S)1 << 64; big--; ps("b2", big); big++; ps("b3", big); }
+	{ S *p = &garr[1]; *p += (S)1 << 65; ps("ptr", *p); p[-1] <<= 64; ps("ptr2", garr[0]); garr[1] = garr[0] = c ? 9 : 10; ps("cp", garr[1]); }
+	ps("cond", z ? a : d); ps("cond2", !z ? (S)1 : d); pu("comma", (z, ub));
+	ps("id", idS(d)); pu("addU", addU(ua, ub)); pu("addU2", addU(ub, ub)); ps("mix", mix(3, d, -2.5, ub, 'a'));
+	ps("va", vsum(3, d, a, (S)1 << 100)); ps("va2", vsum(2, (S)1, b));
+	ps("lit", (S)0x123456789abcdefLL * 1000000007); pu("lit2", ((U)1 << 127) | ((U)1 << 3));
+	ps("fold", (((S)1 << 100) / 3) % 1000003); pu("fold2", ~(U)0 / 10); ps("fold3", -(((S)1 << 120) >> 7));
+	pu("kb", (U)(_Bool)((S)5 << 100)); ps("kb2", (_Bool)(U)0 + (S)2);
+	pu("k1", (U)(S)-1 * 3); pu("k2", ((U)1 << 127) / 3 % 1000003); ps("k3", ((S)-1 << 100) / 7); ps("k4", -((S)1 << 100) % 1000003);
+	pu("k5", ((((U)5 << 70) & ((U)7 << 68)) | ((U)1 << 100)) ^ 12345); ps("k6", +((S)3 << 90) - -((S)1 << 99)); pu("k7", ~((U)1 << 70) + (U)0);
+	ps("kf", (S)(float)16777217); pu("kf2", (U)(double)(((U)1 << 64) + 1)); ps("kf3", -(int)(S)5 + (S)0);
+	idS(d); -idS(d); (void)addU(ua, ub);
+	{ struct { int a: 5; unsigned b: 7; long long c: 40; } bf = {3, 100, -5}; bf.a += (S)13; bf.b *= (U)3; bf.c -= ((S)1 << 70) + 9; bf.a |= (U)8; bf.b /= (S)-1;
+	  printf("bf %d %u %lld\n", bf.a, bf.b, bf.c); }
+	printf("sz %zu %zu %zu\n", sizeof(S), _Alignof(U), sizeof garr);
 	return 0;
 }
 `

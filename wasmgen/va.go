@@ -31,7 +31,7 @@ func (g *fgen) varargs(args []cc.ExpressionNode) error {
 	for _, a := range args {
 		v := vararg{e: a, t: a.Type()}
 		switch {
-		case isLD(v.t):
+		case isLD(v.t) || isI128(v.t):
 			// 16 bytes at a 16-byte boundary of the buffer (probed with
 			// clang 23.1.4: printf("%d %Lf", 5, x) puts x at offset 16).
 			v.pass, v.s = passQuad, scalar{vt: wasm.I64, bits: 8 * quadSize}
@@ -81,7 +81,7 @@ func (g *fgen) varargs(args []cc.ExpressionNode) error {
 		}
 		if v.pass == passQuad {
 			g.slotAddress(buf + v.off)
-			if err := g.ldAddr(v.e); err != nil {
+			if err := g.quadAddr(v.e, v.t); err != nil {
 				return err
 			}
 			g.constant(quadSize, intScalar)
@@ -230,9 +230,7 @@ func (g *fgen) vaArg(n cc.Node, ap cc.ExpressionNode, t cc.Type) error {
 	if err := g.address(tg); err != nil {
 		return err
 	}
-	if err := g.loadTarget(tg); err != nil {
-		return err
-	}
+	g.loadTarget(tg)
 	if align > 4 {
 		g.constant(align-1, intScalar)
 		g.op(opI32Add)

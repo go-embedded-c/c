@@ -449,8 +449,25 @@ func (g *fgen) compare(a, b cc.ExpressionNode, signed, unsigned byte) error {
 		// Both operands are arithmetic: the comparison is in long double.
 		_, oka := scalarOf(a.Type())
 		_, okb := scalarOf(b.Type())
-		if (oka || isLD(a.Type())) && (okb || isLD(b.Type())) {
+		if (oka || isLD(a.Type()) || isI128(a.Type())) && (okb || isLD(b.Type()) || isI128(b.Type())) {
 			return g.ldCompare(a, b, signed)
+		}
+	}
+	if isI128(a.Type()) || isI128(b.Type()) {
+		ct := cc.UsualArithmeticConversions(a.Type(), b.Type())
+		if isI128(ct) {
+			return g.iCompare(a, b, ct, signed)
+		}
+		// Otherwise the common type is floating; anything else falls to the
+		// checks below, which refuse the __int128 operand by name.
+		if common, ok := scalarOf(ct); ok && common.isFloat {
+			for _, e := range []cc.ExpressionNode{a, b} {
+				if err := g.operand(e, common); err != nil {
+					return err
+				}
+			}
+			g.op(floatRel(signed, common))
+			return nil
 		}
 	}
 	if _, ok := scalarOf(a.Type()); !ok {
@@ -534,6 +551,13 @@ func (g *fgen) unary(x *cc.UnaryExpression, s scalar) error {
 			g.op(opI32Eqz)
 			return nil
 		}
+		if isI128(x.CastExpression.Type()) {
+			if err := g.iCondition(x.CastExpression); err != nil {
+				return err
+			}
+			g.op(opI32Eqz)
+			return nil
+		}
 		if isLD(x.CastExpression.Type()) {
 			// !x is x == 0: false for NaN.
 			if err := g.ldCondition(x.CastExpression); err != nil {
@@ -595,8 +619,8 @@ func (g *fgen) effect(e cc.ExpressionNode) error {
 		case cc.PostfixExpressionInc, cc.PostfixExpressionDec:
 			return g.incdec(x, x.PostfixExpression, x.Case == cc.PostfixExpressionInc, true, false)
 		case cc.PostfixExpressionCall:
-			if isLD(x.Type()) {
-				if err := g.ldAddr(x); err != nil {
+			if isLD(x.Type()) || isI128(x.Type()) {
+				if err := g.quadAddr(x, x.Type()); err != nil {
 					return err
 				}
 				g.op(opDrop)
@@ -673,8 +697,8 @@ func (g *fgen) effect(e cc.ExpressionNode) error {
 		g.op(opDrop)
 		return nil
 	}
-	if isLD(e.Type()) {
-		if err := g.ldAddr(e); err != nil {
+	if isLD(e.Type()) || isI128(e.Type()) {
+		if err := g.quadAddr(e, e.Type()); err != nil {
 			return err
 		}
 		g.op(opDrop)
@@ -754,11 +778,11 @@ func (g *fgen) address(t *target) error {
 }
 
 // loadTarget pushes the value of t; address ran before for memory.
-func (g *fgen) loadTarget(t *target) error {
+func (g *fgen) loadTarget(t *target) {
 	if t.local {
 		g.op(opLocalGet)
 		g.uleb(uint64(t.index))
-		return nil
+		return
 	}
 	g.op(opLocalGet)
 	g.uleb(uint64(t.addr))
@@ -766,11 +790,10 @@ func (g *fgen) loadTarget(t *target) error {
 		g.loadUnit(t.unit)
 		g.extract(t.unit)
 		g.convert(t.unit.field(), t.s)
-		return nil
+		return
 	}
 	op, align := t.s.load()
 	g.memarg(op, align)
-	return nil
 }
 
 // store stores the value on the stack into t, leaving a copy when want. For
@@ -822,14 +845,16 @@ func (g *fgen) load(e cc.ExpressionNode) error {
 		return err
 	}
 	if t.local {
-		return g.loadTarget(t)
+		g.loadTarget(t)
+		return nil
 	}
 	if t.bf {
 		if err := g.address(t); err != nil {
 			return err
 		}
 		g.op(opDrop)
-		return g.loadTarget(t)
+		g.loadTarget(t)
+		return nil
 	}
 	if err := g.addr(t.e); err != nil {
 		return err
@@ -883,12 +908,26 @@ func (g *fgen) assign(x *cc.AssignmentExpression, want bool) error {
 		// Only effect gets here with a long double (ldAddr takes the value).
 		return g.ldAssign(x, false)
 	}
+	if isI128(x.UnaryExpression.Type()) {
+		// Only effect gets here with an __int128 (iAddr takes the value).
+		return g.iAssign(x, false)
+	}
 	t, err := g.lvalue(x.UnaryExpression)
 	if err != nil {
 		return err
 	}
 	if x.Case != cc.AssignmentExpressionAssign && isLD(x.AssignmentExpression.Type()) {
 		return g.ldScalarAssign(x, t, want)
+	}
+	if x.Case != cc.AssignmentExpressionAssign && isI128(x.AssignmentExpression.Type()) {
+		if t.s.ptr {
+			return unsupported(x, "compound assignment of a pointer by an __int128")
+		}
+		ct := cc.UsualArithmeticConversions(x.UnaryExpression.Type(), x.AssignmentExpression.Type())
+		if !isI128(ct) {
+			return unsupported(x, "compound assignment by an __int128 in "+typeName(ct))
+		}
+		return g.iScalarAssign(x, t, ct, want)
 	}
 	if x.Case == cc.AssignmentExpressionAssign {
 		if err := g.operand(x.AssignmentExpression, t.s); err != nil {
@@ -931,9 +970,7 @@ func (g *fgen) assign(x *cc.AssignmentExpression, want bool) error {
 		if err := g.address(t); err != nil {
 			return err
 		}
-		if err := g.loadTarget(t); err != nil {
-			return err
-		}
+		g.loadTarget(t)
 		g.op(opLocalGet)
 		g.uleb(uint64(r))
 		g.op(pick(x.Case == cc.AssignmentExpressionAdd, opI32Add, opI32Sub))
@@ -964,9 +1001,7 @@ func (g *fgen) assign(x *cc.AssignmentExpression, want bool) error {
 	if err := g.address(t); err != nil {
 		return err
 	}
-	if err := g.loadTarget(t); err != nil {
-		return err
-	}
+	g.loadTarget(t)
 	g.convert(t.s, os)
 	g.op(opLocalGet)
 	g.uleb(uint64(r))
@@ -980,6 +1015,10 @@ func (g *fgen) assign(x *cc.AssignmentExpression, want bool) error {
 // the size of the object pointed to, for a pointer), yielding the old value
 // for the postfix forms.
 func (g *fgen) incdec(n, e cc.ExpressionNode, inc, post, want bool) error {
+	if isI128(e.Type()) {
+		// As for long double: only effect arrives here.
+		return g.iIncDec(e, inc, post, false)
+	}
 	if isLD(e.Type()) {
 		if err := g.ldIncDec(e, inc, post, want); err != nil {
 			return err
@@ -1009,9 +1048,7 @@ func (g *fgen) incdec(n, e cc.ExpressionNode, inc, post, want bool) error {
 	if err := g.address(t); err != nil {
 		return err
 	}
-	if err := g.loadTarget(t); err != nil {
-		return err
-	}
+	g.loadTarget(t)
 	var old uint32
 	if post && want {
 		old = g.local(t.s.vt)
@@ -1122,8 +1159,8 @@ func (g *fgen) emitCall(x *cc.PostfixExpression, f *sig, args, extra []cc.Expres
 			g.op(0xfc, 10, 0, 0) // memory.copy
 			g.slotAddress(tmp)
 		case p.pass == passQuad:
-			// A long double: its two i64, low half first.
-			la, err := g.ldLocal(a)
+			// A long double or an __int128: its two i64, low half first.
+			la, err := g.quadLocal(a, p.t)
 			if err != nil {
 				return err
 			}
@@ -1152,7 +1189,7 @@ func (g *fgen) emitCall(x *cc.PostfixExpression, f *sig, args, extra []cc.Expres
 		}
 	}
 	emit()
-	if isAggregate(f.rtype) || isLD(f.rtype) {
+	if isAggregate(f.rtype) || isLD(f.rtype) || isI128(f.rtype) {
 		if f.result != nil {
 			// A singleton result: store it to memory, to give it an address.
 			v := g.local(f.result.vt)

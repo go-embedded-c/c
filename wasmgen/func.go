@@ -322,6 +322,9 @@ func (g *fgen) condition(e cc.ExpressionNode) error {
 	if isLD(e.Type()) {
 		return g.ldCondition(e)
 	}
+	if isI128(e.Type()) {
+		return g.iCondition(e)
+	}
 	if isCx(e.Type()) {
 		return g.cxTruth(e)
 	}
@@ -368,11 +371,11 @@ func (g *fgen) statement(s *cc.Statement) error {
 func (g *fgen) jumpStatement(j *cc.JumpStatement) error {
 	switch j.Case {
 	case cc.JumpStatementReturn:
-		if e := j.ExpressionList; e != nil && isLD(g.sig.rtype) {
-			// A long double result goes to the caller's memory, whose
-			// address is parameter 0.
+		if e := j.ExpressionList; e != nil && (isLD(g.sig.rtype) || isI128(g.sig.rtype)) {
+			// A long double or __int128 result goes to the caller's memory,
+			// whose address is parameter 0.
 			g.op(opLocalGet, 0)
-			if err := g.ldAddr(e); err != nil {
+			if err := g.quadAddr(e, g.sig.rtype); err != nil {
 				return err
 			}
 			g.constant(quadSize, intScalar)
