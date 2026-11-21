@@ -819,7 +819,9 @@ typedef float v4sf __attribute__((vector_size(16)));
 typedef double v2df __attribute__((vector_size(16)));
 typedef int v2si __attribute__((vector_size(8)));
 typedef char v4qi __attribute__((vector_size(4)));
+typedef short __attribute__((vector_size(8))) v4hs;
 static v4si gi = {150, -100, 7, 200};
+static v4hs ghs = {-7, 300};
 static v2df gd = {1.5};
 struct S { char c; v4si v; };
 static void pi(const char *n, v4si v) { printf("%s %d %d %d %d\n", n, v[0], v[1], v[2], v[3]); }
@@ -859,6 +861,8 @@ int main(void) {
 	s.c = 1; s.v = j; s.v[3] = 7; pi("member", s.v);
 	for (i = 0; i < 2; i++) pi("cond", i ? j : gi);
 	pi("lit", (v4si){1, 2} + (v4si){3});
+	pi("argl", twice((v4si){31})); q = (v8qi){31, -128, 127}; q %= (signed char)-19; pqi("crem", q);
+	{ v4hs a = {1, -2, 3}, b = (v4hs){4} * a + ghs; printf("spec %d %d %d %d %zu\n", b[0], b[1], b[2], b[3], sizeof b); }
 	printf("%d %d %zu %zu\n", (gi + j)[1], (gi == gi)[3], sizeof(v8qi), _Alignof(v2df));
 	printf("%llx %llx %d\n", (unsigned long long)q, (long long)(v2si){5, 0x3ff00000}, (int)(v4qi){1, 2, 3, 4});
 	return 0;
