@@ -127,6 +127,9 @@ func (g *fgen) ldAddr(e cc.ExpressionNode) error {
 		// Its real part, at the start of its 32 bytes (ldcx.go).
 		return g.aggAddr(e)
 	}
+	if isI128(e.Type()) {
+		return g.iToLD(e)
+	}
 	if !isLD(e.Type()) {
 		return g.ldFromScalar(e)
 	}
@@ -331,6 +334,9 @@ func (g *fgen) operand(e cc.ExpressionNode, to scalar) error {
 		// A long double _Complex in a scalar context: its real part.
 		return g.ldToScalar(e, to)
 	}
+	if isI128(e.Type()) {
+		return g.iToScalar(e, to)
+	}
 	from, err := g.rvalue(e)
 	if err != nil {
 		return err
@@ -502,9 +508,7 @@ func (g *fgen) ldScalarAssign(x *cc.AssignmentExpression, t *target, want bool) 
 	if err := g.address(t); err != nil {
 		return err
 	}
-	if err := g.loadTarget(t); err != nil {
-		return err
-	}
+	g.loadTarget(t)
 	g.ldFromStack(t.s)
 	l := g.local(wasm.I32)
 	g.setLocal(l)

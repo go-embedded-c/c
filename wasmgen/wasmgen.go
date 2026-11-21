@@ -455,7 +455,7 @@ func (m *module) stringLiteral(v string, n int64) uint32 {
 // storable reports whether objects of type t can be laid out by the
 // generator: scalars, structures, unions and arrays of them.
 func storable(t cc.Type) bool {
-	if _, ok := scalarOf(t); ok || isLD(t) {
+	if _, ok := scalarOf(t); ok || isLD(t) || isI128(t) {
 		return true
 	}
 	if a, ok := t.(*cc.ArrayType); ok && !a.IsVLA() {

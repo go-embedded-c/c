@@ -132,7 +132,7 @@ const (
 
 // abiOf classifies t; s is the wasm scalar for passDirect.
 func abiOf(t cc.Type) (passing, scalar, bool) {
-	if isLD(t) {
+	if isLD(t) || isI128(t) {
 		return passQuad, scalar{vt: wasm.I64, bits: 64}, true
 	}
 	if isCx(t) || isLDCx(t) || isVec(t) {
@@ -147,9 +147,10 @@ func abiOf(t cc.Type) (passing, scalar, bool) {
 		}
 		return passIndirect, scalar{vt: wasm.I32, bits: 32, ptr: true, elem: t.Size()}, true
 	}
-	if leaf, ok := singletonLeaf(t); ok && isAggregate(t) && isLD(leaf) {
+	if leaf, ok := singletonLeaf(t); ok && isAggregate(t) && (isLD(leaf) || isI128(leaf)) {
 		// clang passes struct { long double x; } as its two i64, which is
 		// not what the other aggregates do: refused, never compiled wrongly.
+		// The same for struct { __int128 x; }, which is not probed.
 		return 0, scalar{}, false
 	}
 	if !isAggregate(t) {

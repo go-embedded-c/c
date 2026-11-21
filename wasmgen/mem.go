@@ -92,6 +92,13 @@ func (m *module) staticValue(e cc.ExpressionNode, t cc.Type, seg *wasm.Segment, 
 		copy(seg.Init[off:off+t.Size()], v)
 		return nil
 	}
+	if isI128(t) {
+		// The 16 bytes of a constant, computed in math/big (int128.go).
+		if !i128Static(e, t, seg.Init[off:off+quadSize]) {
+			return unsupported(e, "non-constant initializer")
+		}
+		return nil
+	}
 	if isLD(t) {
 		// The 16 bytes of the binary128 value, computed exactly (quad.go).
 		if !ldStatic(e, seg.Init[off:]) {
@@ -789,7 +796,7 @@ func (g *fgen) unionCast(x *cc.CastExpression, u *cc.UnionType) error {
 	if f == nil {
 		return unsupported(x, "cast of "+typeName(e.Type())+" to a union without a member of its type")
 	}
-	if isLD(f.Type()) || isLDCx(f.Type()) {
+	if isLD(f.Type()) || isLDCx(f.Type()) || isI128(f.Type()) {
 		return unsupported(x, "cast of "+typeName(e.Type())+" to a union")
 	}
 	slot := g.frameSlot(u.Size(), u.Align())
@@ -1051,9 +1058,9 @@ func (g *fgen) localInit(in *cc.Initializer, slot int64) error {
 			g.op(0xfc, 10, 0, 0) // memory.copy
 			continue
 		}
-		if isLD(t) {
+		if isLD(t) || isI128(t) {
 			g.slotAddress(at)
-			if err := g.ldAddr(e); err != nil {
+			if err := g.quadAddr(e, t); err != nil {
 				return err
 			}
 			g.constant(quadSize, intScalar)
