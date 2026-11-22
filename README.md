@@ -21,7 +21,7 @@ is checked against a reference, never against expectations written by hand.
 |---|---|---|
 | M0 oracle harness | `internal/oracle`, `cmd/coracle`, golden file, corpus runner, cc/v4 parse smoke test | **done** |
 | M1 front end | package `cell`: splitter, declaration/statement classification, hoisting, embedded headers, defines/uses with `Def`, prelude; go-notebook's C language is built on it (v0.2.1). The wasm32 `ABI` is not yet upstreamed. | **done** |
-| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals and `__func__`, `main(argc, argv)`, `float`, `double` and `long double` (binary128), `float`, `double`, `long double` and GNU integer `_Complex`, bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), `asm` statements with an empty template, the `mode` and `packed` attributes, clang's bit-field layout and promotion, statement expressions, labels as values, irreducible loops, GNU vectors, casts to a union, `__int128` and block-scope variable-length arrays. 1667 gcc torture files run as under clang | **in progress** |
+| M2 code generator | package `wasmgen`, cc/v4 AST → relocatable wasm32 object; design in [docs/design-m2.md](docs/design-m2.md). W1–W3, W4a–W4d and W5–W7 are done: object writer, the `wasm-ld` + wazero harness against clang, integer expressions, locals, globals, calls, control flow structured after Ramsey (2022), memory (pointers, arrays, the linear-stack frame, string literals, static addresses), structures and unions with the BasicCABI passing rules, variadic functions, static locals and `__func__`, `main(argc, argv)`, `float`, `double` and `long double` (binary128), `float`, `double`, `long double` and GNU integer `_Complex`, bit-fields, compound literals, `goto`, function pointers and the computing GCC builtins (`alloca`, `*_overflow`, the quiet comparisons, bit counts, `fabs`/`copysign`/`inf`/`nan`, `isinf`/`signbit`, `ffs`, `bswap`), address constants of members (`&s.m`, `&p->m`), `asm` statements with an empty template, the `mode` and `packed` attributes, clang's bit-field layout and promotion, statement expressions, labels as values, irreducible loops, GNU vectors, casts to a union, `__int128`, block-scope variable-length arrays and variable-length array parameters. 1669 gcc torture files run as under clang | **in progress** |
 | M3 cell runtime | shared memory/table session, cell linker, WASI host, limits | planned |
 | M4 – M5 | notebook bridge, conformance and performance | planned |
 
@@ -416,8 +416,14 @@ what clang 23.1.4 emits for wasm32:
   `__builtin_fputs` is refused, because clang does not know it.
   `__builtin_imaxabs` is refused too: cc/v4 would type the undeclared
   call `int` where clang keeps `intmax_t`.
-- A pointer to a variable-length array is refused. Its step is a size
-  known only at run time, and cc/v4's is not that size.
+- A pointer to a variable-length array is a plain pointer whose step is
+  known only at run time, and cc/v4's is not that size. A parameter
+  `char a[2][n]`, `char (*p)[n]` or `int a[][n][3]` is supported: on entry
+  each variable dimension of the pointee is evaluated once, for its effects
+  (C11 6.9.1p10), and the element's size, the product of the dimensions and
+  the base size in 32 bits, is kept in a local; `p + i`, `i + p`, `p - i` and
+  `p[i]` scale by it. Refused by name: `p - q`, `p += n`, `p++` and `--p` on
+  such a pointer, a cast to one, and one that is a local, not a parameter.
 
 `__int128` and `unsigned __int128` are 16 bytes aligned to 16, held in
 memory like `long double`, and passed as clang does (probed with
@@ -606,8 +612,8 @@ W7 adds `goto`:
     dimension (`int a[2][n]`; `int a[n][4]` compiles), one more
     aligned than 16, and one in a parenthesized declarator.
 - Also refused: a function-scope `typedef` of a variable-length type,
-  `sizeof` of one, a variable-length array parameter or structure member,
-  and a pointer to one. cc/v4 folds such a size, which C computes at run
+  `sizeof` of one, a structure member of such a type, and the pointer
+  forms listed above. cc/v4 folds such a size, which C computes at run
   time, into a constant.
 
 The generator refuses anything else with an `*Unsupported` error that names
@@ -629,8 +635,10 @@ does for structures, is the fifth):
   misaligning a `long long` in the varargs buffer, on the side that is
   ours.
 - `TestCorpusGCCTorture` counts what happens to each torture file. On
-  2026-11-22, with block-scope variable-length arrays, 1667 files ran the
-  same as under clang, 5 gained and none lost (1662 on 2026-11-21 with
+  2026-11-22, with variable-length array parameters, 1669 files ran the
+  same as under clang, 2 gained and none lost (`pr22061-1.c`, `pr22061-2.c`;
+  1667 the same day with block-scope variable-length arrays, 5 gained and
+  none lost, 1662 on 2026-11-21 with
   `__int128`, 12 gained and none lost, 1650 on 2026-11-20 with statement expressions whose
   value is a structure or a union and GNU casts to a union, 3
   gained and none lost, 1647 with the vector attribute among the
@@ -679,7 +687,8 @@ does for structures, is the fifth):
     74 of the 1713 files clang compiles. Nine were refused on an `lvalue`
     (mostly vector elements), five on a variable-length array, and eight on
     `__int128` parameters and file-scope objects. Measured 2026-11-22, with
-    variable-length arrays: 46 of the 1713.
+    variable-length arrays: 46 of the 1713; with variable-length array
+    parameters: 44.
   - No other file differs. There are three known differences:
     - `shiftdi-2.c` comes from the oracle compiling with `-std=gnu89`,
       where a large decimal constant has another type (#20);
