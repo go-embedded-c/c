@@ -178,7 +178,14 @@ func TestUnsupported(t *testing.T) {
 		// any wasm access.
 		{"struct __attribute__((packed)) S { char c:3; unsigned long long x:64; }; int main(void) { struct S s; s.x = 1; return (int)s.x; }", "bit-field in a storage unit of odd size"},
 		{"int f(); int g(int (*p)()) { return p(1); } int main(void) { return 0; }", "call through a pointer to a function without a prototype"},
-		{"int f(int n) { int a[n]; return 0; } int main(void) { return f(2); }", "variable-length array"},
+		{"int f(int n) { int a[2][n]; return a[0][0]; } int main(void) { return f(2); }", "variable-length array with a variable inner dimension"},
+		{"int f(int n) { int a[n] __attribute__((aligned(32))); return a[0]; } int main(void) { return f(2); }", "over-aligned variable-length array"},
+		{"int f(int n) { int (a[n]); return 0; } int main(void) { return f(2); }", "variable-length array in a parenthesized declarator"},
+		{"int f(int n) { int a[(int)__builtin_nanl(\"0x1g\")]; return 0; } int main(void) { return f(2); }", "__builtin_nanl of a string clang does not read as a number"},
+		{"int f(int n) { for (int a[n]; n; n--) ; return 0; } int main(void) { return f(2); }", "variable-length array in a for declaration"},
+		{"int f(int n) { goto l; { int a[n]; l: a[0] = 1; return a[0]; } } int main(void) { return f(2); }", "jump into the scope of a variable-length array"},
+		{"int f(int n) { int a[n]; a[0] = 1; goto l; { int b[n]; l: b[0] = 2; return a[0] + b[0]; } } int main(void) { return f(2); }", "jump into the scope of a variable-length array"},
+		{"int f(int n) { int a[n]; void *p = &&l; goto *p; l: return 0; } int main(void) { return f(2); }", "computed goto in the scope of a variable-length array"},
 		{"int main(void) { return __builtin_classify_type(1); }", "builtin __builtin_classify_type"},
 		{"int main(void) { asm (\"nop\"); return 0; }", "asm with a template"},
 		{"int main(void) { int x; asm (\"\" : \"=r\" (x)); return x; }", "asm output that no input gives a value"},
@@ -520,6 +527,7 @@ func TestAgainstClang(t *testing.T) {
 		vectorProgram,
 		aggValueProgram,
 		int128Program,
+		vlaProgram,
 		// __func__ (C11 6.4.2.2): each function's own, printed, indexed, its
 		// size, its address stable across calls
 		"#include <stdio.h>\nstatic const char *who(void) { return __func__; }\nint main(void) { printf(\"%s %s %c %zu %d\\n\", __func__, who(), __func__[1], sizeof __func__, who() == who()); return 0; }",
@@ -1198,6 +1206,238 @@ int main(void) {
 	asm volatile ("" : "=r" (c) : "0" (300));
 	asm ("" : "=r" (x), "=r" (y) : "1" (5), "0" (6));
 	printf("%d %d %d %d %lld %s %d %d %d\n", x, y, z, w, m, p, i, c, calls);
+	return 0;
+}
+`
+
+// vlaProgram: block-scope variable-length arrays. The loops of 100000
+// passes over a 4 KB array overflow the stack unless the array is given back
+// where its block ends, and at each jump that leaves it, so each loop leaves
+// by one way only: the end of the block, continue, break, a goto back to a
+// label before the declaration, a goto forward out of the block.
+const vlaProgram = `#include <stdio.h>
+struct P { int a; char c; double d; };
+static void *volatile sink;
+enum { N = 100000 };
+static int kk = 4096; /* not a constant: the arrays of K bytes are variable-length */
+#define K kk
+
+static int sizes(int n) {
+	int t = 0;
+	for (int i = 1; i <= n; i++) {
+		int a[i];
+		for (int j = 0; j < i; j++) a[j] = j * i;
+		t = t * 7 + a[i - 1] + a[0];
+	}
+	return t;
+}
+
+static int siblings(int n) {
+	int t = 0;
+	{ char a[n]; for (int i = 0; i < n; i++) a[i] = i; t += a[n - 1]; sink = a; }
+	{ short b[n * 3]; for (int i = 0; i < n * 3; i++) b[i] = i * 3; t += b[n * 3 - 1]; sink = b; }
+	{ long long c[2]; c[0] = 1; c[1] = n; t += (int)c[1]; }
+	return t;
+}
+
+static int nested(int n) {
+	int t = 0;
+	int a[n];
+	for (int i = 0; i < n; i++) a[i] = i + 1;
+	{
+		int b[n + 1];
+		for (int i = 0; i <= n; i++) b[i] = a[i % n] * 10;
+		{
+			int c[2 * n];
+			for (int i = 0; i < 2 * n; i++) c[i] = a[i % n] + b[i % (n + 1)];
+			for (int m = 0; m < 2 * n; m++) t += c[m];
+		}
+		t = t * 3 + b[n];
+	}
+	return t * 5 + a[n - 1];
+}
+
+static int viaStructs(int n) {
+	struct P p[n];
+	double d[n];
+	for (int i = 0; i < n; i++) {
+		p[i].a = i;
+		p[i].c = 'a' + i;
+		p[i].d = i / 4.0;
+	}
+	for (int k = 0; k < n; k++) d[k] = p[k].d * 3 + p[n - 1 - k].a;
+	double s = 0;
+	for (int m = 0; m < n; m++) s += d[m] + p[m].c;
+	struct P *q = p + 1;
+	return (int)(s * 8) + q[0].a * 1000 + (int)(&p[n - 1] - &p[0]) + ((long)p % 16 == 0) * 100000;
+}
+
+static int alignment(int n) {
+	char c[n];
+	long double w[n];
+	int ok = ((long)c % 16 == 0) + ((long)w % 16 == 0) * 2;
+	char d[n + 1];
+	return ok + ((long)d % 16 == 0) * 4;
+}
+
+static int escape(int n) {
+	int t = 0;
+	for (int i = 1; i < 5; i++) {
+		int a[i * n];
+		a[0] = i;
+		a[i * n - 1] = i * 10;
+		sink = a;
+		t += ((int *)sink)[0] + ((int *)sink)[i * n - 1];
+	}
+	return t;
+}
+
+static int callee(int *p, int n) { int b[n]; b[n - 1] = p[0] + 1; return b[n - 1]; }
+
+static int calls(int n) {
+	int a[n];
+	for (int i = 0; i < n; i++) a[i] = i;
+	int t = 0;
+	for (int m = 0; m < 100; m++) { int b[n]; b[0] = callee(a, n + m); t += b[0] + a[n - 1]; }
+	return t;
+}
+
+static long endBlock(void) {
+	long t = 0;
+	for (int i = 0; i < N; i++) {
+		char b[K];
+		b[0] = i;
+		b[K - 1] = i >> 3;
+		sink = b;
+		t += b[0] + b[K - 1];
+	}
+	return t;
+}
+
+static long viaContinue(void) {
+	long t = 0;
+	for (int i = 0; i < N; i++) {
+		char b[K + i % 2];
+		b[0] = i;
+		sink = b;
+		t += b[0];
+		continue;
+	}
+	int w = 0;
+	while (w++ < N) {
+		char b[K];
+		b[0] = 1;
+		sink = b;
+		if (w > 0) continue;
+		t += 1000000;
+	}
+	do {
+		char b[K];
+		sink = b;
+		if (w-- > 0) continue;
+	} while (w > 0);
+	return t;
+}
+
+static long viaBreak(void) {
+	long t = 0;
+	for (int i = 0; i < N; i++) {
+		for (;;) {
+			char b[K];
+			b[0] = i;
+			sink = b;
+			t += b[0];
+			break;
+		}
+		switch (i % 3) {
+		case 0: { char s[K]; sink = s; s[0] = 2; t += s[0]; break; }
+		default: { int s[K / 4]; sink = s; s[0] = 3; t += s[0]; }
+		}
+	}
+	return t;
+}
+
+static long viaGotoBack(void) {
+	long t = 0;
+	int i = 0;
+again:
+	if (i < N) {
+		char b[K];
+		b[0] = i;
+		sink = b;
+		t += b[0];
+		i++;
+		goto again;
+	}
+	return t;
+}
+
+static long viaGotoSameBlock(void) {
+	long t = 0;
+	int i = 0;
+	{
+	lab:;
+		char b[K];
+		b[0] = i;
+		sink = b;
+		t += b[0];
+		if (++i < N) goto lab;
+	}
+	return t;
+}
+
+static long viaGotoOut(void) {
+	long t = 0;
+	for (int i = 0; i < N; i++) {
+		{
+			int n = K - (i & 1);
+			char b[n];
+			b[0] = i;
+			sink = b;
+			t += b[0];
+			goto out;
+		}
+		t += 1000;
+	out:;
+	}
+	return t;
+}
+
+static int gotoInner(int n) {
+	int t = 0;
+	int a[n];
+	a[0] = 5;
+	{
+		int b[n + 2];
+		b[0] = 7;
+		int k = 0;
+	back:
+		{
+			int c[n + 3];
+			c[0] = k;
+			t += a[0] + b[0] + c[0];
+			if (++k < 3) goto back;
+		}
+	}
+	return t;
+}
+
+static int early(int n) {
+	int a[n];
+	a[0] = 9;
+	if (n > 2) {
+		int b[n];
+		b[0] = a[0] + 1;
+		return b[0];
+	}
+	return a[0];
+}
+
+int main(void) {
+	printf("%d %d %d %d %d\n", sizes(1), sizes(20), siblings(5), siblings(50), nested(6));
+	printf("%d %d %d %d\n", viaStructs(5), alignment(3), escape(4), calls(7));
+	printf("%ld %ld %ld %ld\n", endBlock(), viaContinue(), viaBreak(), viaGotoBack());
+	printf("%ld %ld %d %d %d\n", viaGotoSameBlock(), viaGotoOut(), gotoInner(2), early(1), early(5));
 	return 0;
 }
 `

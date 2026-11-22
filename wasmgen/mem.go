@@ -501,6 +501,11 @@ func (g *fgen) addr(e cc.ExpressionNode) error {
 				g.slotAddress(off)
 				return nil
 			}
+			if i, ok := g.vlaBase[d]; ok {
+				g.op(opLocalGet)
+				g.uleb(uint64(i))
+				return nil
+			}
 			if i, ok := g.refs[d]; ok {
 				g.op(opLocalGet)
 				g.uleb(uint64(i))
@@ -947,7 +952,7 @@ func (g *fgen) offset(e cc.ExpressionNode, size int64) error {
 func (g *fgen) memoryLocal(d *cc.Declarator, id *cc.InitDeclarator) error {
 	t := d.Type()
 	if a, ok := t.(*cc.ArrayType); ok && a.IsVLA() {
-		return unsupported(d, "variable-length array")
+		return g.vlaLocal(d, id, a)
 	}
 	size, err := objectSize(d, id)
 	if err != nil {
