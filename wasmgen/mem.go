@@ -577,7 +577,7 @@ func (g *fgen) addr(e cc.ExpressionNode) error {
 			}
 			// The element's size comes from what p points to: cc/v4 types
 			// m[i] of int m[3][4] as the decayed int *, not as int[4].
-			if err := g.offset(i, elemOf(p.Type()).Size()); err != nil {
+			if err := g.scaled(i, p.Type(), elemOf(p.Type()).Size()); err != nil {
 				return err
 			}
 			g.op(opI32Add)

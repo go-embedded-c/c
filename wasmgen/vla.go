@@ -34,6 +34,118 @@ type vla struct {
 	save, base uint32
 }
 
+// Pointers to variable-length arrays: a parameter char a[2][n], or
+// char (*p)[n], is a plain pointer whose element is n bytes wide at run time
+// (C11 6.7.6.3p7, 6.9.1p10). On entry each variable dimension of the pointee
+// is evaluated once, in order, for its effects, and the element's size (the
+// product of the dimensions and the base size, in 32 bits) is kept in a
+// local; p + i, p[i] scale by it. The local is found from the size
+// expression of the pointee's first variable dimension, which the types
+// derived from the parameter share. Anything else that would step by the
+// element is refused: p - q, p += n, ++p, a cast to such a pointer, and such
+// a pointer that is not a parameter's.
+
+// variableDim reports whether the array level a has a length known at run
+// time.
+func variableDim(a *cc.ArrayType) bool {
+	return a.Len() < 0 && a.SizeExpression() != nil
+}
+
+// vlaKey is the size expression of the first variable dimension of the
+// array type t, or nil when t is not variably modified.
+func vlaKey(t cc.Type) cc.ExpressionNode {
+	for {
+		a, ok := t.(*cc.ArrayType)
+		if !ok {
+			return nil
+		}
+		if variableDim(a) {
+			return a.SizeExpression()
+		}
+		t = a.Elem()
+	}
+}
+
+// pointsToVLA reports whether t is a pointer, or a pointer to pointers,
+// whose pointee is variably modified.
+func pointsToVLA(t cc.Type) bool {
+	for {
+		p, ok := t.(*cc.PointerType)
+		if !ok {
+			return false
+		}
+		t = undecayed(p.Elem())
+		if vlaKey(t) != nil {
+			return true
+		}
+	}
+}
+
+// paramStride evaluates, on entry, the variable dimensions of the pointee of
+// the parameter d and keeps the element's size in a local.
+func (g *fgen) paramStride(d *cc.Declarator) error {
+	pt, ok := d.Type().(*cc.PointerType)
+	if !ok {
+		return nil
+	}
+	t := undecayed(pt.Elem())
+	key := vlaKey(t)
+	if key == nil {
+		return nil
+	}
+	for n := 0; ; n++ {
+		a, ok := t.(*cc.ArrayType)
+		if !ok {
+			break
+		}
+		if variableDim(a) {
+			from, err := g.rvalue(a.SizeExpression())
+			if err != nil {
+				return err
+			}
+			g.convert(from, u32)
+		} else {
+			g.constant(a.Len(), intScalar)
+		}
+		if n > 0 {
+			g.op(opI32Mul)
+		}
+		t = a.Elem()
+	}
+	g.constant(t.Size(), intScalar)
+	g.op(opI32Mul)
+	l := g.local(wasm.I32)
+	g.op(opLocalSet)
+	g.uleb(uint64(l))
+	if g.strides == nil {
+		g.strides = map[cc.ExpressionNode]uint32{}
+	}
+	g.strides[key] = l
+	return nil
+}
+
+// scaled pushes e times the size of the element the pointer or array type
+// pt has, which is static unless that element is variably modified.
+func (g *fgen) scaled(e cc.ExpressionNode, pt cc.Type, static int64) error {
+	key := vlaKey(elemOf(pt))
+	if key == nil {
+		return g.offset(e, static)
+	}
+	l, ok := g.strides[key]
+	if !ok {
+		return unsupported(e, "pointer to a variable-length array that is not a parameter's")
+	}
+	from, err := g.rvalue(e)
+	if err != nil {
+		return err
+	}
+	g.convert(from, intScalar)
+	g.op(opLocalGet)
+	g.uleb(uint64(l))
+	g.op(opI32Mul)
+	return nil
+}
+
 // isVLALocal reports whether d declares a block-scope variable-length array
 // that lives on the stack.
 func isVLALocal(d *cc.Declarator) bool {

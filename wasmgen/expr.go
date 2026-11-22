@@ -302,6 +302,9 @@ func (g *fgen) rvalue(e cc.ExpressionNode) (scalar, error) {
 		case pa && pb:
 			// p - q: the number of elements between them (C11 6.5.6p9).
 			ps, _ := scalarOf(a.Type().Decay())
+			if ps.vla {
+				return s, unsupported(x, "difference of pointers to a variable-length array")
+			}
 			if err := g.ptrValue(a); err != nil {
 				return s, err
 			}
@@ -324,7 +327,7 @@ func (g *fgen) rvalue(e cc.ExpressionNode) (scalar, error) {
 			if err := g.ptrValue(p); err != nil {
 				return s, err
 			}
-			if err := g.offset(n, s.elem); err != nil {
+			if err := g.scaled(n, p.Type(), s.elem); err != nil {
 				return s, err
 			}
 			g.op(op)
@@ -357,6 +360,9 @@ func (g *fgen) rvalue(e cc.ExpressionNode) (scalar, error) {
 			op, align := s.load()
 			g.memargOff(op, align, 0)
 			return s, nil
+		}
+		if pointsToVLA(t) {
+			return s, unsupported(x, "cast to a pointer to a variable-length array")
 		}
 		return s, g.operand(x.CastExpression, s)
 	case *cc.UnaryExpression:
@@ -961,6 +967,9 @@ func (g *fgen) assign(x *cc.AssignmentExpression, want bool) error {
 		if x.Case != cc.AssignmentExpressionAdd && x.Case != cc.AssignmentExpressionSub || rs.ptr {
 			return unsupported(x, "compound assignment of a pointer")
 		}
+		if t.s.vla {
+			return unsupported(x, "compound assignment of a pointer to a variable-length array")
+		}
 		if err := g.offset(x.AssignmentExpression, t.s.elem); err != nil {
 			return err
 		}
@@ -1037,6 +1046,9 @@ func (g *fgen) incdec(n, e cc.ExpressionNode, inc, post, want bool) error {
 	os, one := t.s, int64(1)
 	switch {
 	case t.s.ptr:
+		if t.s.vla {
+			return unsupported(e, "increment of a pointer to a variable-length array")
+		}
 		os, one = scalar{vt: wasm.I32, bits: 32}, t.s.elem
 	case os.bits < 32:
 		os = intScalar

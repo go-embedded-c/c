@@ -69,10 +69,11 @@ type fgen struct {
 	va        uint32                          // then, the parameter with its varargs buffer
 
 	// Variable-length arrays (vla.go).
-	vlas       []vla                       // the live ones, innermost last
-	vlaBase    map[*cc.Declarator]uint32   // the local holding each one's address
-	scopeDepth map[*block]int              // len(vlas) where a break or continue target is entered
-	labelVLAs  map[string][]*cc.Declarator // the ones in scope at each label
+	vlas       []vla                        // the live ones, innermost last
+	vlaBase    map[*cc.Declarator]uint32    // the local holding each one's address
+	scopeDepth map[*block]int               // len(vlas) where a break or continue target is entered
+	labelVLAs  map[string][]*cc.Declarator  // the ones in scope at each label
+	strides    map[cc.ExpressionNode]uint32 // the local holding the element size of a pointer to a VLA, by its first variable dimension
 }
 
 func (g *fgen) op(b ...byte) { g.cur.code = append(g.cur.code, b...) }
@@ -207,16 +208,28 @@ func (m *module) function(fd *cc.FunctionDefinition) error {
 	// The size expressions of a parameter declared as an array (int
 	// b[a++]) are evaluated on entry (C11 6.9.1p10), for their effects:
 	// the parameter itself is adjusted to a pointer.
+	// A parameter whose pointee is variably modified evaluates the
+	// dimensions of the pointee in paramStride, and here only the adjusted
+	// outermost one (the array declarator that names the identifier).
 	for _, p := range params(ft) {
+		pointee := pointsToVLA(p.Declarator.Type())
 		for dd := p.Declarator.DirectDeclarator; dd != nil; dd = dd.DirectDeclarator {
 			switch dd.Case {
 			case cc.DirectDeclaratorArr, cc.DirectDeclaratorStaticArr, cc.DirectDeclaratorArrStatic:
+				if pointee && (dd.DirectDeclarator == nil || dd.DirectDeclarator.Case != cc.DirectDeclaratorIdent) {
+					continue
+				}
 				if e := dd.AssignmentExpression; e != nil && !e.Pure() {
 					if err := g.effect(e); err != nil {
 						return err
 					}
 				}
 			}
+		}
+	}
+	for _, p := range params(ft) {
+		if err := g.paramStride(p.Declarator); err != nil {
+			return err
 		}
 	}
 	g.labelVLAs = vlaLabels(fd.CompoundStatement)
@@ -703,6 +716,11 @@ func (g *fgen) localDeclaration(decl *cc.Declaration) error {
 				return err
 			}
 			continue
+		}
+		if pointsToVLA(d.Type()) {
+			// Its size expressions would have to be evaluated here, and
+			// its element size kept (vla.go).
+			return unsupported(d, "pointer to a variable-length array that is not a parameter's")
 		}
 		s, ok := scalarOf(d.Type())
 		if !ok || d.AddressTaken() {

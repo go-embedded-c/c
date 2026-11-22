@@ -20,6 +20,7 @@ type scalar struct {
 	isFloat bool
 	ptr     bool  // a pointer: an unsigned 32-bit address
 	elem    int64 // for a pointer, the size of what it points to (1 for void, as GNU C)
+	vla     bool  // a pointer to a variably modified type: elem is not its step (vla.go)
 }
 
 // scalarOf returns the representation of t, or false when the generator
@@ -29,11 +30,15 @@ func scalarOf(t cc.Type) (scalar, bool) {
 		return scalar{}, false
 	}
 	if p, ok := t.(*cc.PointerType); ok {
-		if hasVLA(undecayed(p.Elem())) {
+		if vlaKey(undecayed(p.Elem())) != nil {
 			// A pointer to a variable-length array steps by a size known
 			// at run time; cc/v4's is not it (pr22061-1.c, a parameter
-			// char a[2][N]: a[1] is a + N, which needs that size).
-			return scalar{}, false
+			// char a[2][N]: a[1] is a + N). The sites that step by elem
+			// look the size up (vla.go) or refuse on vla.
+			return scalar{vt: wasm.I32, bits: 32, ptr: true, elem: 1, vla: true}, true
+		}
+		if hasVLA(undecayed(p.Elem())) {
+			return scalar{}, false // a structure with a variable-length array member
 		}
 		elem := undecayed(p.Elem()).Size()
 		if elem <= 0 || isVoid(p.Elem()) {

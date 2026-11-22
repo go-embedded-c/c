@@ -195,7 +195,17 @@ func TestUnsupported(t *testing.T) {
 		{"int main(void) { return __builtin_nan(\"0x1g\") != 0; }", "__builtin_nan of a string clang does not read as a number"},
 		{"int main(void) { return __builtin_signbitl(1.0); }", "__builtin_signbitl of double"},
 		{"int main(void) { return __builtin_mul_overflow_p(1, 2, 0); }", "builtin __builtin_mul_overflow_p"},
-		{"int n = 2; void bar(char a[2][n]) { a[1][0] = 1; } int main(void) { return 0; }", "parameter of type pointer to array of char"},
+		{"int f(int n, char (*p)[n], char (*q)[n]) { return (int)(q - p); } int main(void) { return 0; }", "difference of pointers to a variable-length array"},
+		{"int f(int n, char (*p)[n]) { p += 1; return p[0][0]; } int main(void) { return 0; }", "compound assignment of a pointer to a variable-length array"},
+		{"int f(int n, char (*p)[n]) { p++; return p[0][0]; } int main(void) { return 0; }", "increment of a pointer to a variable-length array"},
+		{"int f(int n, char (*p)[n]) { --p; return p[0][0]; } int main(void) { return 0; }", "increment of a pointer to a variable-length array"},
+		{"int f(int n, void *v) { char (*p)[n] = v; return p[1][0]; } int main(void) { return 0; }", "pointer to a variable-length array that is not a parameter's"},
+		{"int f(int n, void *v) { return ((char (*)[n])v)[1][0]; } int main(void) { return 0; }", "cast to a pointer to a variable-length array"},
+		{"int f(int n) { char (*p)[n]; return 0; } int main(void) { return 0; }", "pointer to a variable-length array that is not a parameter's"},
+		{"int f(int n, char (**pp)[n]) { return (*pp)[0][0]; } int main(void) { return 0; }", "pointer to a variable-length array that is not a parameter's"},
+		{"int f(int n, char (*p)[n]) { return (p + (int)__builtin_nanl(\"0x1g\"))[0][0]; } int main(void) { return 0; }", "__builtin_nanl of a string clang does not read as a number"},
+		{"int f(int n, char (*p)[n]) { return p[(int)__builtin_nanl(\"0x1g\")][0]; } int main(void) { return 0; }", "__builtin_nanl of a string clang does not read as a number"},
+		{"int f(int n, char (*p)[n][(int)__builtin_nanl(\"0x1g\")]) { return 0; } int main(void) { return 0; }", "__builtin_nanl of a string clang does not read as a number"},
 		{"int main(void) { return (int)__builtin_return_address(0); }", "builtin __builtin_return_address"},
 		{"int f(); int main(void) { return f(1); }", "call with arguments of a function declared without them in another unit"},
 		{"union U { int i; char *p; }; int main(void) { union U u = (union U)1.5; return u.i; }", "cast of double to a union without a member of its type"},
@@ -530,6 +540,7 @@ func TestAgainstClang(t *testing.T) {
 		aggValueProgram,
 		int128Program,
 		vlaProgram,
+		vlaParamProgram,
 		// __func__ (C11 6.4.2.2): each function's own, printed, indexed, its
 		// size, its address stable across calls
 		"#include <stdio.h>\nstatic const char *who(void) { return __func__; }\nint main(void) { printf(\"%s %s %c %zu %d\\n\", __func__, who(), __func__[1], sizeof __func__, who() == who()); return 0; }",
@@ -1208,6 +1219,61 @@ int main(void) {
 	asm volatile ("" : "=r" (c) : "0" (300));
 	asm ("" : "=r" (x), "=r" (y) : "1" (5), "0" (6));
 	printf("%d %d %d %d %lld %s %d %d %d\n", x, y, z, w, m, p, i, c, calls);
+	return 0;
+}
+`
+
+// vlaParamProgram: parameters whose pointee is variably modified. The row
+// stride is a run-time value (pr22061-1.c); the size expressions are
+// evaluated once, on entry, for their effects (pr22061-2.c).
+const vlaParamProgram = `#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+static int ticks;
+static int tick(int v) { ticks++; return v; }
+
+static void fill(int rows, int n, char a[rows][n]) {
+	for (int i = 0; i < rows; i++)
+		for (int j = 0; j < n; j++) a[i][j] = (char)(i * 10 + j);
+}
+static int sum(int rows, int n, char (*p)[n]) {
+	int t = 0;
+	for (int i = 0; i < rows; i++)
+		for (int j = 0; j < n; j++) t += p[i][j] * (i + 1);
+	return t;
+}
+static int third(int n, int a[][n][3]) { return a[1][n - 1][2] + (*(a + 1))[0][1]; }
+static int wide(int n, short a[][n]) { return a[2][1] * 100 + (a + 1)[1][0]; }
+static int pointer(int n, char (*p)[n]) { return (int)((char *)(p + 3) - (char *)p) + (int)((char *)&p[2] - (char *)p); }
+static int effects(int n, char a[tick(2)][tick(n)]) { return a[1][n - 1]; }
+static int inner(int n, char (*p)[tick(n)]) { return p[1][0]; }
+static int outer(char a[tick(7)][3]) { return a[1][2]; }
+static int callthru(int n, char a[][n]) { return sum(3, n, a) + a[2][n - 1]; }
+static int store(int n, int (*p)[n], int v) { p[1][n - 1] = v; return p[1][n - 1] + p[0][0]; }
+
+int main(void) {
+	char buf[400];
+	int n = 7;
+	memset(buf, 0, sizeof buf);
+	fill(4, n, (char (*)[7])buf);
+	printf("%d %d\n", buf[0], buf[3 * 7 + 6]);
+	printf("sum %d\n", sum(4, n, (void *)buf));
+	int ints[90];
+	for (int u = 0; u < 90; u++) ints[u] = u;
+	printf("third %d\n", third(4, (void *)ints));
+	short sh[60];
+	for (int w = 0; w < 60; w++) sh[w] = (short)(w * 3);
+	printf("wide %d\n", wide(5, (void *)sh));
+	printf("pointer %d\n", pointer(9, (void *)buf));
+	ticks = 0;
+	printf("effects %d ticks %d\n", effects(5, (void *)buf), ticks);
+	ticks = 0;
+	printf("inner %d ticks %d\n", inner(6, (void *)buf), ticks);
+	ticks = 0;
+	printf("outer %d ticks %d\n", outer((void *)buf), ticks);
+	printf("callthru %d\n", callthru(5, (void *)buf));
+	printf("store %d\n", store(4, (void *)ints, 77));
+	printf("ints %d %d\n", ints[7], ints[0]);
 	return 0;
 }
 `
