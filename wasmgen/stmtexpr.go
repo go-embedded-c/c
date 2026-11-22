@@ -77,6 +77,7 @@ func (g *fgen) stmtExprBody(x *cc.PrimaryExpression, value func(last cc.Expressi
 		list = list[:n-1]
 	}
 
+	depth := len(g.vlas)
 	blocks, cur, breaks, continues := g.blocks, g.cur, g.breaks, g.continues
 	labels := maps.Clone(g.labels)
 	defer func() { g.blocks, g.cur, g.breaks, g.continues = blocks, cur, breaks, continues }()
@@ -145,6 +146,7 @@ func (g *fgen) stmtExprBody(x *cc.PrimaryExpression, value func(last cc.Expressi
 		c.offset += base
 		g.cur.calls = append(g.cur.calls, c)
 	}
+	g.endVLAScope(depth)
 	if last != nil {
 		g.op(opLocalGet)
 		g.uleb(uint64(res))

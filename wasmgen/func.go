@@ -67,6 +67,12 @@ type fgen struct {
 	complits  map[*cc.PostfixExpression]int64 // compound literals' frame slots
 	variadic  bool                            // the function takes `...`
 	va        uint32                          // then, the parameter with its varargs buffer
+
+	// Variable-length arrays (vla.go).
+	vlas       []vla                       // the live ones, innermost last
+	vlaBase    map[*cc.Declarator]uint32   // the local holding each one's address
+	scopeDepth map[*block]int              // len(vlas) where a break or continue target is entered
+	labelVLAs  map[string][]*cc.Declarator // the ones in scope at each label
 }
 
 func (g *fgen) op(b ...byte) { g.cur.code = append(g.cur.code, b...) }
@@ -213,6 +219,7 @@ func (m *module) function(fd *cc.FunctionDefinition) error {
 			}
 		}
 	}
+	g.labelVLAs = vlaLabels(fd.CompoundStatement)
 	if err := g.compound(fd.CompoundStatement); err != nil {
 		return err
 	}
@@ -299,6 +306,8 @@ func isFuncName(bi *cc.BlockItem) bool {
 }
 
 func (g *fgen) compound(cs *cc.CompoundStatement) error {
+	depth := len(g.vlas)
+	defer func() { g.endVLAScope(depth) }()
 	for _, bi := range items(cs) {
 		switch bi.Case {
 		case cc.BlockItemDecl:
@@ -441,19 +450,26 @@ func (g *fgen) jumpStatement(j *cc.JumpStatement) error {
 		if len(g.breaks) == 0 {
 			return unsupported(j, "break outside a loop or switch")
 		}
-		g.endJump(g.breaks[len(g.breaks)-1])
+		to := g.breaks[len(g.breaks)-1]
+		g.restoreVLAs(g.scopeDepth[to])
+		g.endJump(to)
 		g.dead()
 		return nil
 	case cc.JumpStatementContinue:
 		if len(g.continues) == 0 {
 			return unsupported(j, "continue outside a loop")
 		}
-		g.endJump(g.continues[len(g.continues)-1])
+		to := g.continues[len(g.continues)-1]
+		g.restoreVLAs(g.scopeDepth[to])
+		g.endJump(to)
 		g.dead()
 		return nil
 	case cc.JumpStatementGoto:
 		// The graph takes the edge; structure() turns it into br, or
 		// refuses a graph it makes irreducible.
+		if err := g.gotoVLAs(j, j.Token2.SrcStr()); err != nil {
+			return err
+		}
 		g.endJump(g.labelBlock(j.Token2.SrcStr()))
 		g.dead()
 		return nil
@@ -546,6 +562,7 @@ func (g *fgen) switchStatement(s *cc.SelectionStatement) error {
 	g.endJump(target)
 	g.dead()
 	g.breaks = append(g.breaks, exit)
+	g.markDepth(exit)
 	err = g.statement(s.Statement)
 	g.breaks = g.breaks[:len(g.breaks)-1]
 	if err != nil {
@@ -610,8 +627,12 @@ func (g *fgen) iteration(s *cc.IterationStatement) error {
 		return nil
 	case cc.IterationStatementFor, cc.IterationStatementForDecl:
 		if s.Case == cc.IterationStatementForDecl {
+			depth := len(g.vlas)
 			if err := g.localDeclaration(s.Declaration); err != nil {
 				return err
+			}
+			if len(g.vlas) != depth {
+				return unsupported(s.Declaration, "variable-length array in a for declaration")
 			}
 		} else if s.ExpressionList != nil {
 			if err := g.effect(s.ExpressionList); err != nil {
@@ -652,6 +673,8 @@ func (g *fgen) iteration(s *cc.IterationStatement) error {
 func (g *fgen) loopBody(s *cc.Statement, brk, cont *block) error {
 	g.breaks = append(g.breaks, brk)
 	g.continues = append(g.continues, cont)
+	g.markDepth(brk)
+	g.markDepth(cont)
 	err := g.statement(s)
 	g.breaks = g.breaks[:len(g.breaks)-1]
 	g.continues = g.continues[:len(g.continues)-1]

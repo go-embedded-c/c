@@ -69,6 +69,9 @@ func (m *module) labelConst(e cc.ExpressionNode) (int64, bool) {
 
 // gotoExpr compiles goto *e.
 func (g *fgen) gotoExpr(j *cc.JumpStatement) error {
+	if len(g.vlas) > 0 {
+		return unsupported(j, "computed goto in the scope of a variable-length array")
+	}
 	from, err := g.rvalue(j.ExpressionList)
 	if err != nil {
 		return err
