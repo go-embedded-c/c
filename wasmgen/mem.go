@@ -84,6 +84,11 @@ func bitfieldLeaf(in *cc.Initializer) bool {
 // staticValue writes the value of e, of type t, at off in seg.
 func (m *module) staticValue(e cc.ExpressionNode, t cc.Type, seg *wasm.Segment, off int64) error {
 	if a, ok := t.(*cc.ArrayType); ok {
+		// wchar_t s[N] = L"…": the literal's elements, then zeros.
+		if b, ok := wideBytes(e, a.Elem().Size()); ok {
+			copy(seg.Init[off:off+t.Size()], b)
+			return nil
+		}
 		// char s[N] = "…": the literal's bytes, then zeros.
 		v, ok := stringValue(e)
 		if !ok || a.Elem().Size() != 1 {
@@ -209,6 +214,38 @@ func stringValue(e cc.ExpressionNode) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// wideBytes returns the elements of the wide string literal e, its
+// terminating null included, as little-endian bytes, when its elements are
+// width bytes wide (C11 6.7.9p15: an array whose element type is compatible
+// with wchar_t is initialised from L"…"). wasm32's wchar_t is a 32-bit int.
+func wideBytes(e cc.ExpressionNode, width int64) ([]byte, bool) {
+	p, ok := strip(e).(*cc.PrimaryExpression)
+	if !ok || p.Case != cc.PrimaryExpressionLString {
+		return nil, false
+	}
+	switch v := p.Value().(type) {
+	case cc.UTF32StringValue:
+		if width != 4 {
+			return nil, false
+		}
+		b := make([]byte, 0, 4*len(v))
+		for _, r := range v {
+			b = binary.LittleEndian.AppendUint32(b, uint32(r))
+		}
+		return b, true
+	case cc.UTF16StringValue:
+		if width != 2 {
+			return nil, false
+		}
+		b := make([]byte, 0, 2*len(v))
+		for _, u := range v {
+			b = binary.LittleEndian.AppendUint16(b, u)
+		}
+		return b, true
+	}
+	return nil, false
 }
 
 // literalSize is the size of a string literal's array: its bytes and the
@@ -1040,6 +1077,15 @@ func (g *fgen) localInit(in *cc.Initializer, slot int64) error {
 	for i := range in.Len() {
 		at := slot + in.Offset() + i*t.Size()
 		if a, ok := t.(*cc.ArrayType); ok {
+			// wchar_t s[N] = L"…": copy the literal's elements, at most N.
+			if b, ok := wideBytes(e, a.Elem().Size()); ok {
+				g.slotAddress(at)
+				g.op(opI32Const)
+				g.reloc(wasm.RelocMemoryAddrSLEB, g.m.stringLiteral(string(b), int64(len(b))))
+				g.constant(min(t.Size(), int64(len(b))), intScalar)
+				g.op(0xfc, 10, 0, 0) // memory.copy
+				continue
+			}
 			// char s[N] = "…": copy the literal, at most N bytes.
 			v, ok := stringValue(e)
 			if !ok || a.Elem().Size() != 1 {

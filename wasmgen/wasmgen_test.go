@@ -541,6 +541,7 @@ func TestAgainstClang(t *testing.T) {
 		int128Program,
 		vlaProgram,
 		vlaParamProgram,
+		wcharInitProgram,
 		// __func__ (C11 6.4.2.2): each function's own, printed, indexed, its
 		// size, its address stable across calls
 		"#include <stdio.h>\nstatic const char *who(void) { return __func__; }\nint main(void) { printf(\"%s %s %c %zu %d\\n\", __func__, who(), __func__[1], sizeof __func__, who() == who()); return 0; }",
@@ -1219,6 +1220,44 @@ int main(void) {
 	asm volatile ("" : "=r" (c) : "0" (300));
 	asm ("" : "=r" (x), "=r" (y) : "1" (5), "0" (6));
 	printf("%d %d %d %d %lld %s %d %d %d\n", x, y, z, w, m, p, i, c, calls);
+	return 0;
+}
+`
+
+// wcharInitProgram: arrays of wchar_t initialised from a wide string literal,
+// bare or in braces, sized by it, padded, or cut short of the null
+// (C11 6.7.9p14-15), in static and automatic storage, in an array, a
+// structure and a constant (wchar_t-1.c, widechar-2.c).
+const wcharInitProgram = `#include <stdio.h>
+#include <stddef.h>
+#define DUMP(a) do { size_t i; printf(#a " %zu:", sizeof a / sizeof a[0]); for (i = 0; i < sizeof a / sizeof a[0]; i++) printf(" %x", (unsigned)a[i]); printf("\n"); } while (0)
+static wchar_t sized[] = L"héllo";
+static wchar_t padded[8] = L"ab";
+static wchar_t cut[3] = L"abcdef";
+static wchar_t braced[] = {L"braced"};
+static const wchar_t constant[] = L"foo";
+static wchar_t high[] = L"€\U0001F600";
+static wchar_t escapes[] = L"\x41\x20ac\101";
+static wchar_t empty[] = L"";
+struct S { wchar_t n[4]; int k; wchar_t m[3]; };
+static struct S st = { L"hi", 7, L"xyz" };
+static wchar_t grid[2][4] = { L"ab", L"cd" };
+int main(void) {
+	wchar_t asized[] = L"héllo";
+	wchar_t apadded[8] = L"ab";
+	wchar_t acut[3] = L"abcdef";
+	wchar_t abraced[] = {L"braced"};
+	const wchar_t aconstant[] = L"foo";
+	wchar_t ahigh[] = L"€\U0001F600";
+	wchar_t aempty[] = L"";
+	struct S as = { L"hi", 7, L"xyz" };
+	wchar_t agrid[2][4] = { L"ab", L"cd" };
+	DUMP(sized); DUMP(padded); DUMP(cut); DUMP(braced); DUMP(constant);
+	DUMP(high); DUMP(escapes); DUMP(empty); DUMP(st.n); DUMP(st.m); DUMP(grid[1]);
+	printf("%d\n", st.k);
+	DUMP(asized); DUMP(apadded); DUMP(acut); DUMP(abraced); DUMP(aconstant);
+	DUMP(ahigh); DUMP(aempty); DUMP(as.n); DUMP(as.m); DUMP(agrid[1]);
+	printf("%d %zu %zu\n", as.k, sizeof(wchar_t), sizeof sized);
 	return 0;
 }
 `

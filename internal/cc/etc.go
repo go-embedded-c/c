@@ -246,16 +246,24 @@ func toksTrim(s cppTokens) cppTokens {
 
 func stringConst(eh errHandler, tok Token) string {
 	s := tok.SrcStr()
+	wide := false
 	switch tok.Ch {
 	case rune(LONGSTRINGLITERAL):
 		s = s[1:] // Remove leading 'L'.
+		wide = true
 		fallthrough
 	case rune(STRINGLITERAL):
 		var buf strings.Builder
 		for i := 1; i < len(s)-1; {
 			switch c := s[i]; c {
 			case '\\':
-				r, n := decodeEscapeSequence(eh, tok, s[i:])
+				var r rune
+				var n int
+				if wide {
+					r, n = decodeWideEscape(eh, tok, s[i:len(s)-1])
+				} else {
+					r, n = decodeEscapeSequence(eh, tok, s[i:])
+				}
 				switch {
 				case r < 0:
 					buf.WriteByte(byte(-r))
@@ -404,6 +412,34 @@ loop:
 		eh("%v: invalid octal sequence", tok.Position())
 	}
 	return -rune(v), n
+}
+
+// decodeWideEscape decodes an escape sequence of a wide string literal: its
+// value is a wide character, not a byte, so a hexadecimal escape takes every
+// hexadecimal digit that follows ([0]6.4.4.4/6, "\x20ac" is U+20AC) and an
+// octal escape its three digits, each kept whole instead of masked to a byte.
+func decodeWideEscape(eh errHandler, tok Token, s string) (rune, int) {
+	if len(s) > 2 && s[1] == 'x' {
+		v, n := 0, 2
+		for ; n < len(s) && isHexDigit(s[n]); n++ {
+			if v < 1<<24 {
+				v = v<<4 | decodeHex(s[n])
+			}
+		}
+		if n == 2 {
+			eh("%v: \\x used with no following hex digits", tok.Position())
+		}
+		return rune(v), n
+	}
+	r, n := decodeEscapeSequence(eh, tok, s)
+	if r < 0 {
+		r = -r
+	}
+	return r, n
+}
+
+func isHexDigit(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
 }
 
 // universal-character-name	\\u{hex-quad}|\\U{hex-quad}{hex-quad}

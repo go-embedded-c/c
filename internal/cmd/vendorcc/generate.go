@@ -433,6 +433,47 @@ var patches = []filePatch{
 		Old:  "\t\t\t// ok\n\t\tdefault:\n\t\t\tc.errors.add(errorf(\"%v: invalid operands: %s and %s\", n.Token.Position(), a, b))\n\t\t}\n\t\tn.setPure(n.RelationalExpression.Pure() && n.ShiftExpression.Pure())\n",
 		New:  "\t\t\tn.typ = vectorCompare(a, b, c.intT)\n\t\tdefault:\n\t\t\tc.errors.add(errorf(\"%v: invalid operands: %s and %s\", n.Token.Position(), a, b))\n\t\t}\n\t\tn.setPure(n.RelationalExpression.Pure() && n.ShiftExpression.Pure())\n",
 	},
+	{
+		File: "check.go",
+		Why:  "wchar_t s[] = {L\"...\"}: a wide string literal may be enclosed in braces as a narrow one is (C11 6.7.9p15)",
+		Old:  "\t\t\t\t\t\tn.InitializerList.Initializer.check(c, t, t, off, l, f)\n\t\t\t\t\t\treturn r\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n",
+		New: "\t\t\t\t\t\tn.InitializerList.Initializer.check(c, t, t, off, l, f)\n\t\t\t\t\t\treturn r\n\t\t\t\t\t}\n" +
+			"\t\t\t\tdefault:\n" +
+			"\t\t\t\t\t// wchar_t s[] = {L\"…\"}: [0]6.7.9/15, braces optional.\n" +
+			"\t\t\t\t\tif !IsIntegerType(x.Elem()) || x.Elem().Size() != c.wcharT(n).Size() {\n\t\t\t\t\t\tbreak\n\t\t\t\t\t}\n" +
+			"\t\t\t\t\te := n.InitializerList.Initializer.AssignmentExpression\n" +
+			"\t\t\t\t\tif p, ok := e.(*PrimaryExpression); !ok || p.Case != PrimaryExpressionLString {\n\t\t\t\t\t\tbreak\n\t\t\t\t\t}\n" +
+			"\t\t\t\t\tif e.check(c, decay) == Invalid {\n\t\t\t\t\t\tn.val = Unknown\n\t\t\t\t\t\tc.errors.add(errorf(\"TODO %T\", t))\n\t\t\t\t\t\treturn\n\t\t\t\t\t}\n" +
+			"\t\t\t\t\tswitch e.eval(c, decay).(type) {\n\t\t\t\t\tcase UTF16StringValue, UTF32StringValue:\n\t\t\t\t\t\tn.InitializerList.Initializer.check(c, t, t, off, l, f)\n\t\t\t\t\t\treturn r\n\t\t\t\t\t}\n" +
+			"\t\t\t\t}\n\t\t\t}\n",
+	},
+	{
+		File: "etc.go",
+		Why:  "a wide string literal's escapes are wide characters: \\x20ac is U+20AC, not \\x20 then ac, and \\xe9 is U+00E9, not a raw byte (C11 6.4.4.4p6)",
+		Old:  "\ts := tok.SrcStr()\n\tswitch tok.Ch {\n\tcase rune(LONGSTRINGLITERAL):\n\t\ts = s[1:] // Remove leading 'L'.\n\t\tfallthrough\n",
+		New:  "\ts := tok.SrcStr()\n\twide := false\n\tswitch tok.Ch {\n\tcase rune(LONGSTRINGLITERAL):\n\t\ts = s[1:] // Remove leading 'L'.\n\t\twide = true\n\t\tfallthrough\n",
+	},
+	{
+		File: "etc.go",
+		Why:  "and its escapes go through decodeWideEscape",
+		Old:  "\t\t\t\tr, n := decodeEscapeSequence(eh, tok, s[i:])\n\t\t\t\tswitch {\n",
+		New:  "\t\t\t\tvar r rune\n\t\t\t\tvar n int\n\t\t\t\tif wide {\n\t\t\t\t\tr, n = decodeWideEscape(eh, tok, s[i:len(s)-1])\n\t\t\t\t} else {\n\t\t\t\t\tr, n = decodeEscapeSequence(eh, tok, s[i:])\n\t\t\t\t}\n\t\t\t\tswitch {\n",
+	},
+	{
+		File: "etc.go",
+		Why:  "decodeWideEscape: every hexadecimal digit of a wide escape, each octal escape whole",
+		Old:  "// universal-character-name\t\\\\u{hex-quad}",
+		New: "// decodeWideEscape decodes an escape sequence of a wide string literal: its\n" +
+			"// value is a wide character, not a byte, so a hexadecimal escape takes every\n" +
+			"// hexadecimal digit that follows ([0]6.4.4.4/6, \"\\x20ac\" is U+20AC) and an\n" +
+			"// octal escape its three digits, each kept whole instead of masked to a byte.\n" +
+			"func decodeWideEscape(eh errHandler, tok Token, s string) (rune, int) {\n" +
+			"\tif len(s) > 2 && s[1] == 'x' {\n\t\tv, n := 0, 2\n\t\tfor ; n < len(s) && isHexDigit(s[n]); n++ {\n\t\t\tif v < 1<<24 {\n\t\t\t\tv = v<<4 | decodeHex(s[n])\n\t\t\t}\n\t\t}\n" +
+			"\t\tif n == 2 {\n\t\t\teh(\"%v: \\\\x used with no following hex digits\", tok.Position())\n\t\t}\n\t\treturn rune(v), n\n\t}\n" +
+			"\tr, n := decodeEscapeSequence(eh, tok, s)\n\tif r < 0 {\n\t\tr = -r\n\t}\n\treturn r, n\n}\n\n" +
+			"func isHexDigit(c byte) bool {\n\treturn c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'\n}\n\n" +
+			"// universal-character-name\t\\\\u{hex-quad}",
+	},
 }
 
 // vectorGo is added to the package: the typing of GNU vectors.
