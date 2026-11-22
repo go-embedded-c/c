@@ -224,11 +224,7 @@ func stringValue(e cc.ExpressionNode) (string, bool) {
 // The front end gives a wide literal the value of the target's wchar_t, and
 // checks that the array's elements have its size, so no width is tested here.
 func wideBytes(e cc.ExpressionNode) ([]byte, bool) {
-	p, ok := strip(e).(*cc.PrimaryExpression)
-	if !ok {
-		return nil, false
-	}
-	v, ok := p.Value().(cc.UTF32StringValue)
+	v, ok := strip(e).Value().(cc.UTF32StringValue)
 	if !ok {
 		return nil, false
 	}
