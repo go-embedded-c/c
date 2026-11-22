@@ -1511,6 +1511,21 @@ func (n *Initializer) check(c *ctx, currObj, t Type, off int64, l *InitializerLi
 						n.InitializerList.Initializer.check(c, t, t, off, l, f)
 						return r
 					}
+				default:
+					// wchar_t s[] = {L"…"}: [0]6.7.9/15, braces optional.
+					if !IsIntegerType(x.Elem()) || x.Elem().Size() != c.wcharT(n).Size() {
+						break
+					}
+					e := n.InitializerList.Initializer.AssignmentExpression
+					if p, ok := e.(*PrimaryExpression); !ok || p.Case != PrimaryExpressionLString {
+						break
+					}
+					e.check(c, decay)
+					switch e.eval(c, decay).(type) {
+					case UTF16StringValue, UTF32StringValue:
+						n.InitializerList.Initializer.check(c, t, t, off, l, f)
+						return r
+					}
 				}
 			}
 		}
