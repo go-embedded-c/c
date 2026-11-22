@@ -37,9 +37,6 @@ type vla struct {
 // isVLALocal reports whether d declares a block-scope variable-length array
 // that lives on the stack.
 func isVLALocal(d *cc.Declarator) bool {
-	if d.IsTypename() || d.IsStatic() || d.IsExtern() {
-		return false
-	}
 	a, ok := d.Type().(*cc.ArrayType)
 	return ok && a.IsVLA()
 }

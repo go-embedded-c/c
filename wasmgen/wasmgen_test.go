@@ -182,6 +182,8 @@ func TestUnsupported(t *testing.T) {
 		{"int f(int n) { int a[n] __attribute__((aligned(32))); return a[0]; } int main(void) { return f(2); }", "over-aligned variable-length array"},
 		{"int f(int n) { int (a[n]); return 0; } int main(void) { return f(2); }", "variable-length array in a parenthesized declarator"},
 		{"int f(int n) { int a[(int)__builtin_nanl(\"0x1g\")]; return 0; } int main(void) { return f(2); }", "__builtin_nanl of a string clang does not read as a number"},
+		{"int f(int n) { static int a[n]; return 0; } int main(void) { return f(2); }", "object of incomplete type"},
+		{"int f(int n) { typedef int T[n]; T a; return 0; } int main(void) { return f(2); }", "variable-length type"},
 		{"int f(int n) { for (int a[n]; n; n--) ; return 0; } int main(void) { return f(2); }", "variable-length array in a for declaration"},
 		{"int f(int n) { goto l; { int a[n]; l: a[0] = 1; return a[0]; } } int main(void) { return f(2); }", "jump into the scope of a variable-length array"},
 		{"int f(int n) { int a[n]; a[0] = 1; goto l; { int b[n]; l: b[0] = 2; return a[0] + b[0]; } } int main(void) { return f(2); }", "jump into the scope of a variable-length array"},
