@@ -1520,11 +1520,7 @@ func (n *Initializer) check(c *ctx, currObj, t Type, off int64, l *InitializerLi
 					if p, ok := e.(*PrimaryExpression); !ok || p.Case != PrimaryExpressionLString {
 						break
 					}
-					if e.check(c, decay) == Invalid {
-						n.val = Unknown
-						c.errors.add(errorf("TODO %T", t))
-						return
-					}
+					e.check(c, decay)
 					switch e.eval(c, decay).(type) {
 					case UTF16StringValue, UTF32StringValue:
 						n.InitializerList.Initializer.check(c, t, t, off, l, f)

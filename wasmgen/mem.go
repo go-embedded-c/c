@@ -85,7 +85,7 @@ func bitfieldLeaf(in *cc.Initializer) bool {
 func (m *module) staticValue(e cc.ExpressionNode, t cc.Type, seg *wasm.Segment, off int64) error {
 	if a, ok := t.(*cc.ArrayType); ok {
 		// wchar_t s[N] = L"…": the literal's elements, then zeros.
-		if b, ok := wideBytes(e, a.Elem().Size()); ok {
+		if b, ok := wideBytes(e); ok {
 			copy(seg.Init[off:off+t.Size()], b)
 			return nil
 		}
@@ -220,32 +220,23 @@ func stringValue(e cc.ExpressionNode) (string, bool) {
 // terminating null included, as little-endian bytes, when its elements are
 // width bytes wide (C11 6.7.9p15: an array whose element type is compatible
 // with wchar_t is initialised from L"…"). wasm32's wchar_t is a 32-bit int.
-func wideBytes(e cc.ExpressionNode, width int64) ([]byte, bool) {
+//
+// The front end gives a wide literal the value of the target's wchar_t, and
+// checks that the array's elements have its size, so no width is tested here.
+func wideBytes(e cc.ExpressionNode) ([]byte, bool) {
 	p, ok := strip(e).(*cc.PrimaryExpression)
-	if !ok || p.Case != cc.PrimaryExpressionLString {
+	if !ok {
 		return nil, false
 	}
-	switch v := p.Value().(type) {
-	case cc.UTF32StringValue:
-		if width != 4 {
-			return nil, false
-		}
-		b := make([]byte, 0, 4*len(v))
-		for _, r := range v {
-			b = binary.LittleEndian.AppendUint32(b, uint32(r))
-		}
-		return b, true
-	case cc.UTF16StringValue:
-		if width != 2 {
-			return nil, false
-		}
-		b := make([]byte, 0, 2*len(v))
-		for _, u := range v {
-			b = binary.LittleEndian.AppendUint16(b, u)
-		}
-		return b, true
+	v, ok := p.Value().(cc.UTF32StringValue)
+	if !ok {
+		return nil, false
 	}
-	return nil, false
+	b := make([]byte, 0, 4*len(v))
+	for _, r := range v {
+		b = binary.LittleEndian.AppendUint32(b, uint32(r))
+	}
+	return b, true
 }
 
 // literalSize is the size of a string literal's array: its bytes and the
@@ -1078,7 +1069,7 @@ func (g *fgen) localInit(in *cc.Initializer, slot int64) error {
 		at := slot + in.Offset() + i*t.Size()
 		if a, ok := t.(*cc.ArrayType); ok {
 			// wchar_t s[N] = L"…": copy the literal's elements, at most N.
-			if b, ok := wideBytes(e, a.Elem().Size()); ok {
+			if b, ok := wideBytes(e); ok {
 				g.slotAddress(at)
 				g.op(opI32Const)
 				g.reloc(wasm.RelocMemoryAddrSLEB, g.m.stringLiteral(string(b), int64(len(b))))

@@ -443,7 +443,7 @@ var patches = []filePatch{
 			"\t\t\t\t\tif !IsIntegerType(x.Elem()) || x.Elem().Size() != c.wcharT(n).Size() {\n\t\t\t\t\t\tbreak\n\t\t\t\t\t}\n" +
 			"\t\t\t\t\te := n.InitializerList.Initializer.AssignmentExpression\n" +
 			"\t\t\t\t\tif p, ok := e.(*PrimaryExpression); !ok || p.Case != PrimaryExpressionLString {\n\t\t\t\t\t\tbreak\n\t\t\t\t\t}\n" +
-			"\t\t\t\t\tif e.check(c, decay) == Invalid {\n\t\t\t\t\t\tn.val = Unknown\n\t\t\t\t\t\tc.errors.add(errorf(\"TODO %T\", t))\n\t\t\t\t\t\treturn\n\t\t\t\t\t}\n" +
+			"\t\t\t\t\te.check(c, decay)\n" +
 			"\t\t\t\t\tswitch e.eval(c, decay).(type) {\n\t\t\t\t\tcase UTF16StringValue, UTF32StringValue:\n\t\t\t\t\t\tn.InitializerList.Initializer.check(c, t, t, off, l, f)\n\t\t\t\t\t\treturn r\n\t\t\t\t\t}\n" +
 			"\t\t\t\t}\n\t\t\t}\n",
 	},
