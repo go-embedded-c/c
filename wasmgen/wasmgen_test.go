@@ -1570,6 +1570,10 @@ int vnone(int n, ...);
 struct FV { float x; };
 double fmix(float a, double b, struct FV v, int n, ...);
 struct FV mkfv(float x);
+struct SC { char c; };
+struct SS { short s; };
+struct SA { char x[1]; };
+long long vnarrow(int n, ...);
 `
 
 const abiLib = `struct P mkp(int a, int b) { struct P p; p.a = a; p.b = b; return p; }
@@ -1614,6 +1618,21 @@ double fmix(float a, double b, struct FV v, int n, ...) {
 	return t;
 }
 struct FV mkfv(float x) { struct FV v; v.x = x * 2; return v; }
+long long vnarrow(int n, ...) {
+	va_list ap;
+	long long t = 0;
+	va_start(ap, n);
+	while (n-- > 0) {
+		struct SC c = va_arg(ap, struct SC);
+		struct SS s = va_arg(ap, struct SS);
+		struct SA a = va_arg(ap, struct SA);
+		struct SC d = va_arg(ap, struct SC);
+		t = t * 7 + c.c * 1000 + s.s * 30 + a.x[0] * 5 + d.c;
+		t = t * 7 + va_arg(ap, long long);
+	}
+	va_end(ap);
+	return t;
+}
 `
 
 const abiMain = `void abort(void);
@@ -1635,6 +1654,14 @@ int main(void) {
 		if (vmix(6, 1, s, 2, 1LL << 40, 3, "A", 4, p, 1, (char)7, 5, l) !=
 			((((-2 * 3 + (1LL << 40)) * 3 + 'A') * 3 + 34) * 3 + 7) * 3 + (1LL << 35)) abort();
 		if (vnone(9) != 9) abort();
+	}
+	{
+		struct SC c = {-3}, d = {4};
+		struct SS s = {-300};
+		struct SA a = {{9}};
+#define STEP(T, C, S, A, D, L) (((T) * 7 + (C).c * 1000 + (S).s * 30 + (A).x[0] * 5 + (D).c) * 7 + (L))
+		if (vnarrow(1, c, s, a, d, 1LL << 33) != STEP(0, c, s, a, d, 1LL << 33)) abort();
+		if (vnarrow(2, c, s, a, d, 5LL, d, s, a, c, 6LL) != STEP(STEP(0, c, s, a, d, 5LL), d, s, a, c, 6LL)) abort();
 	}
 	{
 		float q = 4.0f;
