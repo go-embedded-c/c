@@ -43,9 +43,6 @@ func (g *fgen) varargs(args []cc.ExpressionNode) error {
 			if pass == passIgnored {
 				continue // an empty structure takes no room (clang: ignored)
 			}
-			if pass == passDirect && s.bits < 32 {
-				return unsupported(a, "variadic argument of a narrow singleton type")
-			}
 			v.pass, v.s = pass, s
 			if pass == passIndirect {
 				v.s = scalar{vt: wasm.I32, bits: 32, ptr: true}
@@ -57,9 +54,12 @@ func (g *fgen) varargs(args []cc.ExpressionNode) error {
 			}
 			v.s = s
 		}
-		align := int64(max(4, v.s.bits/8))
-		v.off = (size + align - 1) &^ (align - 1)
-		size = v.off + int64(v.s.bits/8)
+		// A slot is at least 4 bytes: a structure of one char or short goes
+		// by value in the low bytes of one (clang 23.1.4 passes it as i8 or
+		// i16, and va_arg steps over 4).
+		width := int64(max(4, v.s.bits/8))
+		v.off = (size + width - 1) &^ (width - 1)
+		size = v.off + width
 		vs = append(vs, v)
 	}
 	if len(vs) == 0 {
