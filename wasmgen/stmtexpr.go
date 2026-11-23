@@ -92,6 +92,8 @@ func (g *fgen) stmtExprBody(x *cc.PrimaryExpression, value func(last cc.Expressi
 	for _, bi := range list {
 		var err error
 		switch bi.Case {
+		case cc.BlockItemLabel:
+			g.localLabels(bi)
 		case cc.BlockItemDecl:
 			err = g.localDeclaration(bi.Declaration)
 		case cc.BlockItemStmt:
@@ -116,12 +118,21 @@ func (g *fgen) stmtExprBody(x *cc.PrimaryExpression, value func(last cc.Expressi
 	exit := &block{}
 	g.endJump(exit)
 
-	if !maps.Equal(labels, g.labels) {
-		return unsupported(x, "label or goto in a statement expression")
-	}
 	inside := map[*block]bool{}
 	for _, b := range g.blocks {
 		inside[b] = true
+	}
+	// A label the body declares and defines, `__label__ top; top: …`, lives
+	// in it: the jumps to it come from inside. A label of the function that
+	// the body mentions, or one that is only jumped to, is not.
+	for name, b := range g.labels {
+		if old, had := labels[name]; had && old == b {
+			continue
+		}
+		if !inside[b] || !g.declared[name] {
+			return unsupported(x, "label or goto in a statement expression")
+		}
+		delete(g.labels, name)
 	}
 	for _, b := range g.blocks {
 		for _, s := range b.succ {
