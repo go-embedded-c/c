@@ -151,7 +151,8 @@ func TestUnsupported(t *testing.T) {
 		{"int main(void) { int x = 1; return x ?: 2; }", "?: without a middle operand"},
 		{"struct S { long double d; }; struct S f(struct S s) { return s; } int main(void) { return 0; }", "parameter of type struct S {d long double}"},
 		{"struct S { long double d[1]; }; int g(struct S); int main(void) { struct S s = {1}; return g(s); }", "parameter of type struct S {d array of 1 long double}"},
-		{"long double d = 1e-4950L; int main(void) { return 0; }", "non-constant initializer"},
+		{"int main(void) { int x = ({ goto a; 1; }); a: return x; }", "label or goto in a statement expression"},
+		{"int main(void) { int x = ({ a: ; 1; }); return x; }", "label or goto in a statement expression"}, {"long double d = 1e-4950L; int main(void) { return 0; }", "non-constant initializer"},
 		{"int main(void) { long double d = 1e-4950L; return d; }", "long double constant 1e-4950L"},
 		{"int n; long double d = n; int main(void) { return 0; }", "non-constant initializer"},
 		{"int main(void) { long double d = 1; int k = 3; k %= d; return k; }", "compound assignment of a scalar by a long double"},
@@ -542,6 +543,7 @@ func TestAgainstClang(t *testing.T) {
 		vlaProgram,
 		vlaParamProgram,
 		wcharInitProgram,
+		localLabelProgram,
 		// __func__ (C11 6.4.2.2): each function's own, printed, indexed, its
 		// size, its address stable across calls
 		"#include <stdio.h>\nstatic const char *who(void) { return __func__; }\nint main(void) { printf(\"%s %s %c %zu %d\\n\", __func__, who(), __func__[1], sizeof __func__, who() == who()); return 0; }",
@@ -1220,6 +1222,48 @@ int main(void) {
 	asm volatile ("" : "=r" (c) : "0" (300));
 	asm ("" : "=r" (x), "=r" (y) : "1" (5), "0" (6));
 	printf("%d %d %d %d %lld %s %d %d %d\n", x, y, z, w, m, p, i, c, calls);
+	return 0;
+}
+`
+
+// localLabelProgram: `__label__` declarations (GCC manual, Local Labels) at
+// the top of a function, of a block and of a statement expression, with a
+// goto to each (930406-1.c, 980526-1.c).
+const localLabelProgram = `#include <stdio.h>
+static int count(int x) {
+	__label__ again, done;
+	int n = 0;
+again:
+	n++;
+	if (n < x) goto again;
+	goto done;
+done:
+	return n;
+}
+static int viaExpr(int x) {
+	int r = ({
+		__label__ top;
+		int k = x;
+	top:
+		k++;
+		if (k != 3) goto top;
+		k * 10;
+	});
+	return r;
+}
+static int block(int x) {
+	int s = 0;
+	{
+		__label__ in;
+		goto in;
+		s = 100;
+	in:
+		s += x;
+	}
+	return s;
+}
+int main(void) {
+	printf("%d %d %d\n", count(5), viaExpr(1), block(7));
 	return 0;
 }
 `

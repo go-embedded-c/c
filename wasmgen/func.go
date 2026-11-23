@@ -49,6 +49,7 @@ type fgen struct {
 	continues []*block
 	cases     map[*cc.LabeledStatement]*block
 	labels    map[string]*block // goto targets, by name
+	declared  map[string]bool   // names of `__label__` declarations
 	dispatch  *block            // the target of every goto *, when there is one (labeladdr.go)
 	target    uint32            // the local holding the address a goto * jumps to
 
@@ -318,11 +319,26 @@ func isFuncName(bi *cc.BlockItem) bool {
 	return il != nil && il.InitDeclaratorList == nil && il.InitDeclarator.Declarator.Name() == "__func__"
 }
 
+// localLabels records the names a `__label__ a, b;` declares (GCC manual,
+// Local Labels). Labels are keyed by name for the whole function; the front
+// end refuses a name declared or defined twice, so no two labels share a key.
+// A statement expression may define the labels it declares.
+func (g *fgen) localLabels(bi *cc.BlockItem) {
+	if g.declared == nil {
+		g.declared = map[string]bool{}
+	}
+	for l := bi.LabelDeclaration.IdentifierList; l != nil; l = l.IdentifierList {
+		g.declared[l.Token2.SrcStr()] = true
+	}
+}
+
 func (g *fgen) compound(cs *cc.CompoundStatement) error {
 	depth := len(g.vlas)
 	defer func() { g.endVLAScope(depth) }()
 	for _, bi := range items(cs) {
 		switch bi.Case {
+		case cc.BlockItemLabel:
+			g.localLabels(bi)
 		case cc.BlockItemDecl:
 			if err := g.localDeclaration(bi.Declaration); err != nil {
 				return err
